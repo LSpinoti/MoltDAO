@@ -4,10 +4,10 @@ import {
   type Address,
   type Hex,
   createPublicClient,
-  http,
 } from 'viem';
 import { base, baseSepolia } from 'viem/chains';
 import { env } from './config.js';
+import { rpcTransport } from './rpcTransport.js';
 
 export type DraftActionInput = {
   proposer: Address;
@@ -195,7 +195,7 @@ async function simulateSwapCall(to: Address, data: Hex) {
   const chain = env.BASE_CHAIN_ID === 84532 ? baseSepolia : base;
   const publicClient = createPublicClient({
     chain,
-    transport: http(env.BASE_RPC_URL),
+    transport: rpcTransport(env.BASE_RPC_URL),
   });
 
   try {

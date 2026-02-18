@@ -62,6 +62,13 @@ For Base Sepolia testing, set:
 
 Use `QUOTE_PROVIDER=0x` (or `auto` on supported chains) for mainnet quote drafting.
 
+Default Alchemy CU caps are preconfigured to keep total throughput at `<= 500 CU/s`
+when API + indexer + agent runtime are running together:
+`INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT=300`,
+`AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT=180`,
+`API_ALCHEMY_CU_PER_SECOND_LIMIT=20`.
+Higher values are clamped in code; lower values are allowed.
+
 3. Start Postgres.
 
 ```bash
@@ -85,13 +92,19 @@ pnpm --filter @agentra/web dev
 
 ## Contract deployment
 
-Use Foundry deploy script from `contracts/`:
+Redeploy with the helper script:
+
+```bash
+./scripts/redeploy.sh
+```
+
+Equivalent manual command from `contracts/`:
 
 ```bash
 USDC_ADDRESS=0x... PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --broadcast
 ```
 
-Then copy deployed addresses into `.env`.
+The helper script writes deployed addresses back into `.env` automatically.
 
 ## API endpoints
 

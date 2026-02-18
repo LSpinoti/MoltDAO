@@ -14,6 +14,11 @@ Update `.env` with:
 - USDC and deployed contract addresses
 - API keys for 0x (optional but recommended)
 - Agent private keys
+- Alchemy CU budgets (defaults sum to `500 CU/s`):
+  - `INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT=300`
+  - `AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT=180`
+  - `API_ALCHEMY_CU_PER_SECOND_LIMIT=20`
+  - values above these are clamped in code; use lower values if needed
 
 ## 2) Contracts
 
@@ -27,10 +32,14 @@ forge test
 Deploy:
 
 ```bash
-USDC_ADDRESS=0x... PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --broadcast
+./scripts/redeploy.sh
 ```
 
-Copy deployed addresses back to `.env`.
+Manual equivalent from `contracts/`:
+
+```bash
+USDC_ADDRESS=0x... PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --broadcast
+```
 
 ## 3) Start stack
 

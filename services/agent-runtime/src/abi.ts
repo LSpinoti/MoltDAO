@@ -48,6 +48,20 @@ export const stakeVaultAbi = [
     inputs: [],
     outputs: [{ name: '', type: 'uint256' }],
   },
+  {
+    type: 'function',
+    name: 'postBondMin',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'availableBalance',
+    stateMutability: 'view',
+    inputs: [{ name: 'agent', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
 ] as const;
 
 export const forumAbi = [
@@ -59,6 +73,8 @@ export const forumAbi = [
   { type: 'error', name: 'AlreadyVoted', inputs: [] },
   { type: 'error', name: 'VoteNotFound', inputs: [] },
   { type: 'error', name: 'VoteLockStillActive', inputs: [] },
+  { type: 'error', name: 'InsufficientAvailableBalance', inputs: [] },
+  { type: 'error', name: 'Unauthorized', inputs: [] },
   {
     type: 'function',
     name: 'createPost',
@@ -81,9 +97,36 @@ export const forumAbi = [
     ],
     outputs: [],
   },
+  {
+    type: 'function',
+    name: 'comment',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'postId', type: 'uint256' },
+      { name: 'contentHash', type: 'bytes32' },
+    ],
+    outputs: [{ name: 'commentId', type: 'uint256' }],
+  },
+  {
+    type: 'event',
+    name: 'CommentCreated',
+    inputs: [
+      { indexed: true, name: 'commentId', type: 'uint256' },
+      { indexed: true, name: 'parentPostId', type: 'uint256' },
+      { indexed: true, name: 'author', type: 'address' },
+      { indexed: false, name: 'contentHash', type: 'bytes32' },
+    ],
+  },
 ] as const;
 
 export const actionExecutorAbi = [
+  {
+    type: 'function',
+    name: 'actionExists',
+    stateMutability: 'view',
+    inputs: [{ name: 'actionId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'bool' }],
+  },
   {
     type: 'function',
     name: 'createAction',

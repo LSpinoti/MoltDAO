@@ -1,12 +1,13 @@
 import cors from 'cors';
 import express from 'express';
 import { z } from 'zod';
-import { createPublicClient, http } from 'viem';
-import { base } from 'viem/chains';
+import { createPublicClient, type Address } from 'viem';
+import { base, baseSepolia } from 'viem/chains';
 import { keccak256, toHex } from 'viem';
 import { env } from './config.js';
 import { db } from './db.js';
 import { draftSwapAction } from './zeroex.js';
+import { rpcTransport } from './rpcTransport.js';
 
 const app = express();
 
@@ -20,10 +21,46 @@ function buildCanonicalPostContent(title: string | undefined, body: string): str
   return `${normalizedTitle}\n\n${normalizedBody}`;
 }
 
+const CHAIN_BY_ID = {
+  8453: base,
+  84532: baseSepolia,
+} as const;
+
+const runtimeChain = CHAIN_BY_ID[env.BASE_CHAIN_ID as keyof typeof CHAIN_BY_ID] ?? base;
+const publicClient = createPublicClient({ chain: runtimeChain, transport: rpcTransport(env.BASE_RPC_URL) });
+
+const stakeVaultAbi = [
+  {
+    type: 'function',
+    name: 'bondedBalance',
+    stateMutability: 'view',
+    inputs: [{ name: 'agent', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'availableBalance',
+    stateMutability: 'view',
+    inputs: [{ name: 'agent', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const;
+
+function parseBigIntLike(value: unknown): bigint {
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') return BigInt(Math.trunc(value));
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return 0n;
+    return BigInt(trimmed);
+  }
+
+  return 0n;
+}
+
 app.get('/health', async (_req, res) => {
   try {
     const dbResult = await db.query('SELECT NOW() AS now');
-    const publicClient = createPublicClient({ chain: base, transport: http(env.BASE_RPC_URL) });
     const latestBlock = await publicClient.getBlockNumber();
 
     res.json({
@@ -46,22 +83,28 @@ app.get('/feed', async (req, res) => {
   const result = await db.query(
     `
       SELECT
-        p.id,
+        p.id::int AS id,
         p.author,
         p.post_type,
         COALESCE(p.post_title, pb.title, 'Untitled post') AS post_title,
         p.content_hash,
         pb.body,
-        p.action_id,
+        p.action_id::int AS action_id,
         p.created_at,
         p.tx_hash,
         a.status AS action_status,
         a.type AS action_type,
         a.amount_in,
-        a.min_amount_out
+        a.min_amount_out,
+        COALESCE(comment_counts.comment_count, 0) AS comment_count
       FROM posts p
       LEFT JOIN post_bodies pb ON lower(pb.content_hash) = lower(p.content_hash)
       LEFT JOIN actions a ON p.action_id = a.id
+      LEFT JOIN (
+        SELECT parent_post_id, COUNT(*)::int AS comment_count
+        FROM comments
+        GROUP BY parent_post_id
+      ) comment_counts ON comment_counts.parent_post_id = p.id
       ORDER BY p.created_at DESC
       LIMIT $1 OFFSET $2
     `,
@@ -103,13 +146,13 @@ app.get('/post/:id', async (req, res) => {
     db.query(
       `
         SELECT
-          p.id,
+          p.id::int AS id,
           p.author,
           p.post_type,
           COALESCE(p.post_title, pb.title, 'Untitled post') AS post_title,
           p.content_hash,
           pb.body,
-          p.action_id,
+          p.action_id::int AS action_id,
           p.created_at,
           p.tx_hash
         FROM posts p
@@ -118,7 +161,24 @@ app.get('/post/:id', async (req, res) => {
       `,
       [postId],
     ),
-    db.query('SELECT * FROM comments WHERE parent_post_id = $1 ORDER BY created_at ASC', [postId]),
+    db.query(
+      `
+        SELECT
+          c.id::int AS id,
+          c.parent_post_id::int AS parent_post_id,
+          c.parent_comment_id::int AS parent_comment_id,
+          c.author,
+          c.body,
+          c.content_hash,
+          c.source,
+          c.created_at,
+          c.tx_hash
+        FROM comments c
+        WHERE c.parent_post_id = $1
+        ORDER BY c.created_at ASC, c.id ASC
+      `,
+      [postId],
+    ),
     db.query(
       `
         SELECT a.*
@@ -175,6 +235,188 @@ const postBodySchema = z.object({
     .optional(),
 });
 
+const commentBodySchema = z.object({
+  commentId: z.number().int().positive(),
+  parentPostId: z.number().int().positive(),
+  parentCommentId: z.number().int().positive().optional().nullable(),
+  contentHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+  body: z.string().min(1).max(4000),
+  author: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  txHash: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+});
+
+const memoryWriteSchema = z.object({
+  memoryType: z.enum(['observation', 'decision', 'outcome']).default('observation'),
+  referenceType: z.string().trim().min(1).max(80).optional().nullable(),
+  referenceId: z.string().trim().min(1).max(160).optional().nullable(),
+  text: z.string().trim().min(1).max(4000),
+  metadata: z.record(z.unknown()).optional().nullable(),
+});
+
+app.get('/agent/:id/memory', async (req, res) => {
+  const address = req.params.id.toLowerCase();
+  const limit = Math.min(Math.max(Number(req.query.limit ?? 30), 1), 200);
+
+  const result = await db.query(
+    `
+      SELECT
+        id::int AS id,
+        agent,
+        memory_type,
+        reference_type,
+        reference_id,
+        memory_text,
+        metadata,
+        created_at
+      FROM agent_memories
+      WHERE lower(agent) = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2
+    `,
+    [address, limit],
+  );
+
+  res.json({
+    agent: address,
+    count: result.rowCount,
+    items: result.rows,
+  });
+});
+
+app.post('/agent/:id/memory', async (req, res) => {
+  const address = req.params.id.toLowerCase();
+  const parsed = memoryWriteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+
+  const inserted = await db.query(
+    `
+      INSERT INTO agent_memories (agent, memory_type, reference_type, reference_id, memory_text, metadata, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, NOW())
+      RETURNING id::int AS id, created_at
+    `,
+    [
+      address,
+      parsed.data.memoryType,
+      parsed.data.referenceType ?? null,
+      parsed.data.referenceId ?? null,
+      parsed.data.text,
+      parsed.data.metadata ? JSON.stringify(parsed.data.metadata) : null,
+    ],
+  );
+
+  res.json({ ok: true, memory: inserted.rows[0] });
+});
+
+app.get('/dao/shares', async (_req, res) => {
+  const [agentsResult, votesResult] = await Promise.all([
+    db.query('SELECT lower(address) AS address, handle FROM agents'),
+    db.query(
+      `
+        SELECT
+          lower(voter) AS address,
+          COALESCE(SUM(stake_amount::numeric), 0) AS total_voted_stake,
+          COALESCE(SUM(CASE WHEN support THEN stake_amount::numeric ELSE 0 END), 0) AS support_stake
+        FROM votes
+        GROUP BY lower(voter)
+      `,
+    ),
+  ]);
+
+  const addresses = new Set<string>();
+  const handleByAddress = new Map<string, string | null>();
+  for (const row of agentsResult.rows) {
+    addresses.add(row.address);
+    handleByAddress.set(row.address, (row.handle as string | null) ?? null);
+  }
+  for (const row of votesResult.rows) {
+    addresses.add(row.address);
+  }
+
+  const voteStakeByAddress = new Map<string, { total: bigint; support: bigint }>();
+  for (const row of votesResult.rows) {
+    voteStakeByAddress.set(row.address, {
+      total: parseBigIntLike(row.total_voted_stake),
+      support: parseBigIntLike(row.support_stake),
+    });
+  }
+
+  const addressList = [...addresses].filter((address) => /^0x[a-fA-F0-9]{40}$/.test(address));
+  const withStake = await Promise.all(
+    addressList.map(async (address) => {
+      if (!env.STAKE_VAULT_ADDRESS) {
+        return {
+          address,
+          bondedBalance: 0n,
+          availableBalance: 0n,
+        };
+      }
+
+      try {
+        const [bondedBalance, availableBalance] = await Promise.all([
+          publicClient.readContract({
+            address: env.STAKE_VAULT_ADDRESS as Address,
+            abi: stakeVaultAbi,
+            functionName: 'bondedBalance',
+            args: [address as Address],
+          }),
+          publicClient.readContract({
+            address: env.STAKE_VAULT_ADDRESS as Address,
+            abi: stakeVaultAbi,
+            functionName: 'availableBalance',
+            args: [address as Address],
+          }),
+        ]);
+
+        return {
+          address,
+          bondedBalance: parseBigIntLike(bondedBalance),
+          availableBalance: parseBigIntLike(availableBalance),
+        };
+      } catch {
+        return {
+          address,
+          bondedBalance: 0n,
+          availableBalance: 0n,
+        };
+      }
+    }),
+  );
+
+  const totalBonded = withStake.reduce((acc, item) => acc + item.bondedBalance, 0n);
+  const members = withStake
+    .map((item) => {
+      const voted = voteStakeByAddress.get(item.address) ?? { total: 0n, support: 0n };
+      const shareBps = totalBonded > 0n ? Number((item.bondedBalance * 10_000n) / totalBonded) : 0;
+
+      return {
+        address: item.address,
+        handle: handleByAddress.get(item.address) ?? null,
+        bondedBalance: item.bondedBalance.toString(),
+        availableBalance: item.availableBalance.toString(),
+        totalVotedStake: voted.total.toString(),
+        supportStake: voted.support.toString(),
+        bondedShareBps: shareBps,
+        bondedSharePct: shareBps / 100,
+      };
+    })
+    .sort((a, b) => {
+      const bondedA = BigInt(a.bondedBalance);
+      const bondedB = BigInt(b.bondedBalance);
+      if (bondedA === bondedB) return a.address.localeCompare(b.address);
+      return bondedA > bondedB ? -1 : 1;
+    });
+
+  res.json({
+    generatedAt: new Date().toISOString(),
+    totalBonded: totalBonded.toString(),
+    memberCount: members.length,
+    members,
+  });
+});
+
 app.post('/posts/body', async (req, res) => {
   const parsed = postBodySchema.safeParse(req.body);
   if (!parsed.success) {
@@ -215,6 +457,76 @@ app.post('/posts/body', async (req, res) => {
       WHERE lower(content_hash) = lower($1)
     `,
     [parsed.data.contentHash, parsed.data.title ?? null],
+  );
+
+  res.json({ ok: true });
+});
+
+app.post('/comments/body', async (req, res) => {
+  const parsed = commentBodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+
+  const normalizedBody = parsed.data.body.trim();
+  const computedHash = keccak256(toHex(normalizedBody));
+  if (computedHash.toLowerCase() !== parsed.data.contentHash.toLowerCase()) {
+    res.status(400).json({ error: 'contentHash does not match body' });
+    return;
+  }
+
+  const postExists = await db.query('SELECT 1 FROM posts WHERE id = $1', [parsed.data.parentPostId]);
+  if (postExists.rowCount === 0) {
+    res.status(404).json({ error: 'post not found' });
+    return;
+  }
+
+  const parentCommentId = parsed.data.parentCommentId ?? null;
+  if (parentCommentId !== null) {
+    const parentResult = await db.query('SELECT 1 FROM comments WHERE id = $1 AND parent_post_id = $2', [
+      parentCommentId,
+      parsed.data.parentPostId,
+    ]);
+    if (parentResult.rowCount === 0) {
+      res.status(400).json({ error: 'parent comment not found on this post' });
+      return;
+    }
+  }
+
+  await db.query(
+    `
+      INSERT INTO comments (
+        id,
+        parent_post_id,
+        parent_comment_id,
+        author,
+        body,
+        content_hash,
+        source,
+        created_at,
+        tx_hash
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, 'onchain', NOW(), $7)
+      ON CONFLICT (id)
+      DO UPDATE SET
+        parent_post_id = EXCLUDED.parent_post_id,
+        parent_comment_id = COALESCE(comments.parent_comment_id, EXCLUDED.parent_comment_id),
+        author = EXCLUDED.author,
+        body = EXCLUDED.body,
+        content_hash = EXCLUDED.content_hash,
+        source = 'onchain',
+        tx_hash = EXCLUDED.tx_hash
+    `,
+    [
+      parsed.data.commentId,
+      parsed.data.parentPostId,
+      parentCommentId,
+      parsed.data.author,
+      normalizedBody,
+      parsed.data.contentHash,
+      parsed.data.txHash,
+    ],
   );
 
   res.json({ ok: true });
@@ -283,8 +595,45 @@ async function ensureApiSchema(): Promise<void> {
     `,
   );
   await db.query('ALTER TABLE post_bodies ADD COLUMN IF NOT EXISTS title TEXT');
+  await db.query('ALTER TABLE comments ADD COLUMN IF NOT EXISTS parent_comment_id BIGINT');
+  await db.query('ALTER TABLE comments ADD COLUMN IF NOT EXISTS body TEXT');
+  await db.query("ALTER TABLE comments ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'onchain'");
+  await db.query('CREATE INDEX IF NOT EXISTS idx_comments_parent_comment_id ON comments(parent_comment_id)');
+  await db.query('CREATE INDEX IF NOT EXISTS idx_comments_parent_post_created_at ON comments(parent_post_id, created_at)');
+  await db.query(
+    `
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'comments_parent_comment_fk'
+        ) THEN
+          ALTER TABLE comments
+          ADD CONSTRAINT comments_parent_comment_fk
+          FOREIGN KEY (parent_comment_id) REFERENCES comments(id) ON DELETE CASCADE;
+        END IF;
+      END
+      $$;
+    `,
+  );
   await db.query('CREATE INDEX IF NOT EXISTS idx_posts_post_title ON posts(post_title)');
   await db.query('CREATE INDEX IF NOT EXISTS idx_post_bodies_author ON post_bodies(author)');
+  await db.query(
+    `
+      CREATE TABLE IF NOT EXISTS agent_memories (
+        id BIGSERIAL PRIMARY KEY,
+        agent TEXT NOT NULL,
+        memory_type TEXT NOT NULL,
+        reference_type TEXT,
+        reference_id TEXT,
+        memory_text TEXT NOT NULL,
+        metadata JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `,
+  );
+  await db.query('CREATE INDEX IF NOT EXISTS idx_agent_memories_agent_created_at ON agent_memories((lower(agent)), created_at DESC)');
   await db.query(
     `
       UPDATE posts p

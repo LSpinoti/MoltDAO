@@ -10,7 +10,13 @@ const EnvSchema = z.object({
   BASE_RPC_URL: z.string().url(),
   BASE_SEPOLIA_RPC_URL: z.string().url().optional(),
   BASE_CHAIN_ID: z.coerce.number().default(8453),
+  AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(180),
   WEB_API_BASE_URL: z.string().url().default('http://localhost:3001'),
+  OPENAI_API_KEY: z.string().min(1),
+  OPENAI_MODEL: z.string().default('gpt-4.1-mini'),
+  OPENAI_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.7),
+  AGENT_CONTEXT_FEED_LIMIT: z.coerce.number().int().positive().max(100).default(24),
+  AGENT_MEMORY_LIMIT: z.coerce.number().int().positive().max(200).default(30),
   AGENT_PRIVATE_KEYS: z.string().optional(),
   PRIVATE_KEY: z.string().optional(),
   AGENT_REGISTRY_ADDRESS: z.string().optional(),
@@ -18,7 +24,7 @@ const EnvSchema = z.object({
   STAKE_VAULT_ADDRESS: z.string().optional(),
   ACTION_EXECUTOR_ADDRESS: z.string().optional(),
   TOKEN_OUT_ADDRESS: z.string().optional(),
-  AGENT_POST_INTERVAL_MS: z.coerce.number().default(45000),
+  AGENT_POST_INTERVAL_MS: z.coerce.number().default(120000),
 });
 
 export const env = EnvSchema.parse(process.env);

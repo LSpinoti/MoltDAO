@@ -4,6 +4,7 @@ import { base, baseSepolia } from 'viem/chains';
 import { env } from './config.js';
 import { db, getIndexerCursor, setIndexerCursor } from './db.js';
 import { ACTION_EXECUTOR_EVENTS, AGENT_REGISTRY_EVENTS, FORUM_EVENTS, REPUTATION_EVENTS } from './abi.js';
+import { createAlchemyRateLimitedFetch } from './alchemyRateLimiter.js';
 
 dotenv.config();
 
@@ -16,10 +17,22 @@ const runtimeChain = CHAIN_BY_ID[env.BASE_CHAIN_ID as keyof typeof CHAIN_BY_ID] 
 const logBlockRange = BigInt(env.INDEXER_LOG_BLOCK_RANGE);
 const LOG_FETCH_BASE_DELAY_MS = 1000;
 const LOG_FETCH_MAX_DELAY_MS = 30000;
+const INDEXER_CU_CAP = 300;
+const indexerCuLimit = Math.min(env.INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT, INDEXER_CU_CAP);
+
+if (env.INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT > INDEXER_CU_CAP) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[indexer] INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT capped to ${INDEXER_CU_CAP} CU/s ` +
+      `(requested ${env.INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT})`,
+  );
+}
+
+const alchemyFetch = createAlchemyRateLimitedFetch('indexer', indexerCuLimit);
 
 const client = createPublicClient({
   chain: runtimeChain,
-  transport: http(env.BASE_RPC_URL),
+  transport: http(env.BASE_RPC_URL, { fetchFn: alchemyFetch }),
 });
 
 const blockTimeCache = new Map<bigint, string>();
@@ -138,7 +151,13 @@ async function handleForumLogs(logs: any[]) {
           INSERT INTO posts (id, author, post_type, content_hash, action_id, created_at, tx_hash)
           VALUES ($1, $2, $3, $4, NULLIF($5, 0), $6, $7)
           ON CONFLICT (id)
-          DO NOTHING
+          DO UPDATE SET
+            author = EXCLUDED.author,
+            post_type = EXCLUDED.post_type,
+            content_hash = EXCLUDED.content_hash,
+            action_id = EXCLUDED.action_id,
+            created_at = EXCLUDED.created_at,
+            tx_hash = EXCLUDED.tx_hash
         `,
         [
           args.postId.toString(),
@@ -167,7 +186,12 @@ async function handleForumLogs(logs: any[]) {
           INSERT INTO comments (id, parent_post_id, author, content_hash, created_at, tx_hash)
           VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT (id)
-          DO NOTHING
+          DO UPDATE SET
+            parent_post_id = EXCLUDED.parent_post_id,
+            author = EXCLUDED.author,
+            content_hash = EXCLUDED.content_hash,
+            created_at = EXCLUDED.created_at,
+            tx_hash = EXCLUDED.tx_hash
         `,
         [
           args.commentId.toString(),

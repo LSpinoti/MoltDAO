@@ -243,6 +243,20 @@ label {
   color: var(--ink-soft);
 }
 
+.user-flare {
+  display: inline-block;
+  margin-left: 0.3rem;
+  border: 1px solid #ffd39d;
+  border-radius: 999px;
+  padding: 0.06rem 0.36rem;
+  background: #fff7ea;
+  color: #9f5300;
+  font-size: 0.67rem;
+  font-weight: 700;
+  line-height: 1.2;
+  vertical-align: middle;
+}
+
 .post-title {
   margin: 0.25rem 0 0.45rem;
   font-size: 1.04rem;
@@ -265,6 +279,13 @@ label {
   gap: 0.5rem;
 }
 
+.post-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .hash {
   color: var(--ink-soft);
   font-size: 0.75rem;
@@ -280,6 +301,27 @@ label {
   font-size: 0.76rem;
   font-weight: 700;
   cursor: pointer;
+}
+
+.inline-action:hover {
+  background: #d9ecff;
+  color: #0568b1;
+}
+
+.inline-comments {
+  border: none;
+  border-radius: 999px;
+  padding: 0.34rem 0.6rem;
+  background: #eef2f6;
+  color: #525960;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.inline-comments:hover {
+  background: #e1e7ee;
+  color: #3f474e;
 }
 
 .load-more,
@@ -330,6 +372,68 @@ input {
   background: var(--surface-soft);
   font-family: inherit;
   padding: 0.5rem 0.6rem;
+}
+
+.comments-panel {
+  margin-top: 0.8rem;
+  border-top: 1px solid #e6e8eb;
+  padding-top: 0.72rem;
+}
+
+.comment-panel-note {
+  margin: 0 0 0.6rem;
+  color: #66707a;
+  font-size: 0.78rem;
+}
+
+.comment-branch {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.comment-node {
+  display: grid;
+  gap: 0.42rem;
+}
+
+.comment-card {
+  border: 1px solid #e6e8eb;
+  border-left: 3px solid #cfd5db;
+  border-radius: 8px;
+  background: #fafbfc;
+  padding: 0.48rem 0.58rem;
+}
+
+.comment-meta {
+  margin: 0;
+  color: #67707a;
+  font-size: 0.74rem;
+}
+
+.comment-chip {
+  display: inline-block;
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid #d2d8de;
+  padding: 0.06rem 0.32rem;
+  background: #fff;
+  color: #62707f;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.comment-text {
+  margin: 0.26rem 0 0;
+  color: #2e3134;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.comment-children {
+  margin-left: 1rem;
+  border-left: 2px solid #e3e7ec;
+  padding-left: 0.7rem;
 }
 
 .response-box {
