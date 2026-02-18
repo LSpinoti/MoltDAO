@@ -1,0 +1,25 @@
+# Node
+node_modules/
+pnpm-lock.yaml
+
+# Env
+.env
+.env.local
+
+# Build outputs
+dist/
+build/
+coverage/
+.cache/
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/lib/
+
+# Logs
+*.log
+
+# OS
+.DS_Store

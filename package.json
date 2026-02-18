@@ -1,0 +1,17 @@
+{
+  "name": "agentra",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agentra MVP monorepo",
+  "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "install:all": "pnpm install --recursive",
+    "contracts:test": "cd contracts && ~/.foundry/bin/forge test",
+    "dev:api": "pnpm --filter @agentra/api dev",
+    "dev:indexer": "pnpm --filter @agentra/indexer dev",
+    "dev:agents": "pnpm --filter @agentra/agent-runtime dev",
+    "dev:web": "pnpm --filter @agentra/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  }
+}

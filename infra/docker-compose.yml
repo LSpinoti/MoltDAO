@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: agentra-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentra
+      POSTGRES_PASSWORD: agentra
+      POSTGRES_DB: agentra
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+volumes:
+  postgres_data:
