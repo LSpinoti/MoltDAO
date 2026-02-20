@@ -32,6 +32,13 @@ const publicClient = createPublicClient({ chain: runtimeChain, transport: rpcTra
 const stakeVaultAbi = [
   {
     type: 'function',
+    name: 'governanceToken',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+  },
+  {
+    type: 'function',
     name: 'bondedBalance',
     stateMutability: 'view',
     inputs: [{ name: 'agent', type: 'address' }],
@@ -42,6 +49,16 @@ const stakeVaultAbi = [
     name: 'availableBalance',
     stateMutability: 'view',
     inputs: [{ name: 'agent', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const;
+
+const erc20Abi = [
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
 ] as const;
@@ -216,9 +233,13 @@ app.get('/post/:id', async (req, res) => {
 const draftActionSchema = z.object({
   proposer: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
   tokenOut: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  amountInUSDC: z.union([z.string(), z.number()]),
+  amountInToken: z.union([z.string(), z.number()]).optional(),
+  amountInUSDC: z.union([z.string(), z.number()]).optional(),
   slippageBps: z.number().int().min(1).max(2000),
   deadlineSeconds: z.number().int().min(60).max(24 * 60 * 60),
+}).refine((data) => data.amountInToken !== undefined || data.amountInUSDC !== undefined, {
+  message: 'amountInToken is required',
+  path: ['amountInToken'],
 });
 
 const postBodySchema = z.object({
@@ -310,7 +331,65 @@ app.post('/agent/:id/memory', async (req, res) => {
   res.json({ ok: true, memory: inserted.rows[0] });
 });
 
-app.get('/dao/shares', async (_req, res) => {
+type DaoSharesMember = {
+  address: string;
+  handle: string | null;
+  walletBalance: string;
+  bondedBalance: string;
+  governanceBalance: string;
+  availableBalance: string;
+  totalVotedStake: string;
+  supportStake: string;
+  governanceShareBps: number;
+  governanceSharePct: number;
+  bondedShareBps: number;
+  bondedSharePct: number;
+};
+
+type DaoSharesResponse = {
+  generatedAt: string;
+  treasuryTokenSymbol: string;
+  treasuryTokenDecimals: number;
+  totalBonded: string;
+  totalGovernance: string;
+  memberCount: number;
+  members: DaoSharesMember[];
+};
+
+const daoSharesCache = {
+  payload: null as DaoSharesResponse | null,
+  cachedAtMs: 0,
+  refreshInFlight: null as Promise<DaoSharesResponse> | null,
+};
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function resolveDaoTokenAddress(): Promise<Address | null> {
+  let daoTokenAddress: Address | null = /^0x[a-fA-F0-9]{40}$/.test(env.DAO_TOKEN_ADDRESS_BASE ?? '')
+    ? (env.DAO_TOKEN_ADDRESS_BASE as Address)
+    : null;
+  if (!daoTokenAddress && env.STAKE_VAULT_ADDRESS) {
+    try {
+      const tokenAddress = await publicClient.readContract({
+        address: env.STAKE_VAULT_ADDRESS as Address,
+        abi: stakeVaultAbi,
+        functionName: 'governanceToken',
+      });
+      if (typeof tokenAddress === 'string' && /^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) {
+        daoTokenAddress = tokenAddress as Address;
+      }
+    } catch {
+      daoTokenAddress = null;
+    }
+  }
+
+  return daoTokenAddress;
+}
+
+async function computeDaoSharesSnapshot(): Promise<DaoSharesResponse> {
+  const daoTokenAddress = await resolveDaoTokenAddress();
   const [agentsResult, votesResult] = await Promise.all([
     db.query('SELECT lower(address) AS address, handle FROM agents'),
     db.query(
@@ -346,75 +425,150 @@ app.get('/dao/shares', async (_req, res) => {
   const addressList = [...addresses].filter((address) => /^0x[a-fA-F0-9]{40}$/.test(address));
   const withStake = await Promise.all(
     addressList.map(async (address) => {
-      if (!env.STAKE_VAULT_ADDRESS) {
-        return {
-          address,
-          bondedBalance: 0n,
-          availableBalance: 0n,
-        };
+      let bondedBalance = 0n;
+      let availableBalance = 0n;
+      let walletBalance = 0n;
+
+      if (env.STAKE_VAULT_ADDRESS) {
+        try {
+          const [bonded, available] = await Promise.all([
+            publicClient.readContract({
+              address: env.STAKE_VAULT_ADDRESS as Address,
+              abi: stakeVaultAbi,
+              functionName: 'bondedBalance',
+              args: [address as Address],
+            }),
+            publicClient.readContract({
+              address: env.STAKE_VAULT_ADDRESS as Address,
+              abi: stakeVaultAbi,
+              functionName: 'availableBalance',
+              args: [address as Address],
+            }),
+          ]);
+          bondedBalance = parseBigIntLike(bonded);
+          availableBalance = parseBigIntLike(available);
+        } catch {
+          bondedBalance = 0n;
+          availableBalance = 0n;
+        }
       }
 
-      try {
-        const [bondedBalance, availableBalance] = await Promise.all([
-          publicClient.readContract({
-            address: env.STAKE_VAULT_ADDRESS as Address,
-            abi: stakeVaultAbi,
-            functionName: 'bondedBalance',
+      if (daoTokenAddress) {
+        try {
+          const wallet = await publicClient.readContract({
+            address: daoTokenAddress,
+            abi: erc20Abi,
+            functionName: 'balanceOf',
             args: [address as Address],
-          }),
-          publicClient.readContract({
-            address: env.STAKE_VAULT_ADDRESS as Address,
-            abi: stakeVaultAbi,
-            functionName: 'availableBalance',
-            args: [address as Address],
-          }),
-        ]);
-
-        return {
-          address,
-          bondedBalance: parseBigIntLike(bondedBalance),
-          availableBalance: parseBigIntLike(availableBalance),
-        };
-      } catch {
-        return {
-          address,
-          bondedBalance: 0n,
-          availableBalance: 0n,
-        };
+          });
+          walletBalance = parseBigIntLike(wallet);
+        } catch {
+          walletBalance = 0n;
+        }
       }
+
+      return {
+        address,
+        walletBalance,
+        bondedBalance,
+        availableBalance,
+        governanceBalance: walletBalance + bondedBalance,
+      };
     }),
   );
 
   const totalBonded = withStake.reduce((acc, item) => acc + item.bondedBalance, 0n);
+  const totalGovernance = withStake.reduce((acc, item) => acc + item.governanceBalance, 0n);
   const members = withStake
     .map((item) => {
       const voted = voteStakeByAddress.get(item.address) ?? { total: 0n, support: 0n };
-      const shareBps = totalBonded > 0n ? Number((item.bondedBalance * 10_000n) / totalBonded) : 0;
+      const shareBps = totalGovernance > 0n ? Number((item.governanceBalance * 10_000n) / totalGovernance) : 0;
 
       return {
         address: item.address,
         handle: handleByAddress.get(item.address) ?? null,
+        walletBalance: item.walletBalance.toString(),
         bondedBalance: item.bondedBalance.toString(),
+        governanceBalance: item.governanceBalance.toString(),
         availableBalance: item.availableBalance.toString(),
         totalVotedStake: voted.total.toString(),
         supportStake: voted.support.toString(),
+        governanceShareBps: shareBps,
+        governanceSharePct: shareBps / 100,
+        // Legacy field names kept for existing clients.
         bondedShareBps: shareBps,
         bondedSharePct: shareBps / 100,
       };
     })
     .sort((a, b) => {
-      const bondedA = BigInt(a.bondedBalance);
-      const bondedB = BigInt(b.bondedBalance);
-      if (bondedA === bondedB) return a.address.localeCompare(b.address);
-      return bondedA > bondedB ? -1 : 1;
+      const governanceA = BigInt(a.governanceBalance);
+      const governanceB = BigInt(b.governanceBalance);
+      if (governanceA === governanceB) return a.address.localeCompare(b.address);
+      return governanceA > governanceB ? -1 : 1;
     });
 
-  res.json({
+  return {
     generatedAt: new Date().toISOString(),
+    treasuryTokenSymbol: env.DAO_TOKEN_SYMBOL,
+    treasuryTokenDecimals: env.DAO_TOKEN_DECIMALS,
     totalBonded: totalBonded.toString(),
+    totalGovernance: totalGovernance.toString(),
     memberCount: members.length,
     members,
-  });
+  };
+}
+
+function refreshDaoSharesCache(): Promise<DaoSharesResponse> {
+  if (daoSharesCache.refreshInFlight) {
+    return daoSharesCache.refreshInFlight;
+  }
+
+  const refreshPromise = computeDaoSharesSnapshot()
+    .then((payload) => {
+      daoSharesCache.payload = payload;
+      daoSharesCache.cachedAtMs = Date.now();
+      return payload;
+    })
+    .finally(() => {
+      if (daoSharesCache.refreshInFlight === refreshPromise) {
+        daoSharesCache.refreshInFlight = null;
+      }
+    });
+
+  daoSharesCache.refreshInFlight = refreshPromise;
+  return refreshPromise;
+}
+
+async function loadDaoSharesFromCache(): Promise<DaoSharesResponse> {
+  const nowMs = Date.now();
+  const cachedPayload = daoSharesCache.payload;
+
+  if (cachedPayload) {
+    const ageMs = nowMs - daoSharesCache.cachedAtMs;
+    if (ageMs <= env.DAO_SHARES_CACHE_TTL_MS) {
+      return cachedPayload;
+    }
+
+    if (ageMs <= env.DAO_SHARES_CACHE_MAX_STALE_MS) {
+      void refreshDaoSharesCache().catch((error) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[api] dao share cache refresh failed: ${formatErrorMessage(error)}`);
+      });
+      return cachedPayload;
+    }
+  }
+
+  return refreshDaoSharesCache();
+}
+
+app.get('/dao/shares', async (_req, res) => {
+  try {
+    const payload = await loadDaoSharesFromCache();
+    res.set('Cache-Control', 'public, max-age=5, stale-while-revalidate=60');
+    res.json(payload);
+  } catch (error) {
+    res.status(500).json({ error: `failed to load dao shares: ${formatErrorMessage(error)}` });
+  }
 });
 
 app.post('/posts/body', async (req, res) => {
@@ -476,23 +630,7 @@ app.post('/comments/body', async (req, res) => {
     return;
   }
 
-  const postExists = await db.query('SELECT 1 FROM posts WHERE id = $1', [parsed.data.parentPostId]);
-  if (postExists.rowCount === 0) {
-    res.status(404).json({ error: 'post not found' });
-    return;
-  }
-
   const parentCommentId = parsed.data.parentCommentId ?? null;
-  if (parentCommentId !== null) {
-    const parentResult = await db.query('SELECT 1 FROM comments WHERE id = $1 AND parent_post_id = $2', [
-      parentCommentId,
-      parsed.data.parentPostId,
-    ]);
-    if (parentResult.rowCount === 0) {
-      res.status(400).json({ error: 'parent comment not found on this post' });
-      return;
-    }
-  }
 
   await db.query(
     `
@@ -539,18 +677,23 @@ app.post('/actions/draft', async (req, res) => {
     return;
   }
 
-  const amountIn = BigInt(parsed.data.amountInUSDC);
+  const amountRaw = parsed.data.amountInToken ?? parsed.data.amountInUSDC;
+  const amountIn = BigInt(amountRaw ?? 0);
 
   try {
     const draft = await draftSwapAction({
       proposer: parsed.data.proposer as `0x${string}`,
       tokenOut: parsed.data.tokenOut as `0x${string}`,
-      amountInUSDC: amountIn,
+      amountInToken: amountIn,
       slippageBps: parsed.data.slippageBps,
       deadlineSeconds: parsed.data.deadlineSeconds,
     });
 
-    res.json(draft);
+    res.json({
+      ...draft,
+      treasuryTokenSymbol: env.DAO_TOKEN_SYMBOL,
+      treasuryTokenDecimals: env.DAO_TOKEN_DECIMALS,
+    });
   } catch (error) {
     res.status(500).json({
       error: error instanceof Error ? error.message : 'failed to draft action',
@@ -645,8 +788,28 @@ async function ensureApiSchema(): Promise<void> {
   );
 }
 
+async function initializeDaoSharesCache(): Promise<void> {
+  try {
+    await refreshDaoSharesCache();
+    // eslint-disable-next-line no-console
+    console.log('[api] dao share cache primed');
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn(`[api] initial dao share cache warmup failed: ${formatErrorMessage(error)}`);
+  }
+
+  const refreshTimer = setInterval(() => {
+    void refreshDaoSharesCache().catch((error) => {
+      // eslint-disable-next-line no-console
+      console.warn(`[api] scheduled dao share cache refresh failed: ${formatErrorMessage(error)}`);
+    });
+  }, env.DAO_SHARES_CACHE_REFRESH_INTERVAL_MS);
+  refreshTimer.unref();
+}
+
 async function main() {
   await ensureApiSchema();
+  await initializeDaoSharesCache();
   app.listen(env.API_PORT, () => {
     // eslint-disable-next-line no-console
     console.log(`[api] listening on :${env.API_PORT}`);

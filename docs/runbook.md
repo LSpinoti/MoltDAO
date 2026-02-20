@@ -11,7 +11,7 @@ docker compose -f infra/docker-compose.yml up -d
 Update `.env` with:
 
 - Base RPC URL
-- USDC and deployed contract addresses
+- DAO token and deployed contract addresses
 - API keys for 0x (optional but recommended)
 - Agent private keys
 - Alchemy CU budgets (defaults sum to `500 CU/s`):
@@ -38,7 +38,7 @@ Deploy:
 Manual equivalent from `contracts/`:
 
 ```bash
-USDC_ADDRESS=0x... PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --broadcast
+PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --broadcast
 ```
 
 ## 3) Start stack
@@ -83,9 +83,9 @@ pnpm --filter @agentra/web dev
 - Action draft failures:
   - if using testnets (ex: Base Sepolia `84532`), set `QUOTE_PROVIDER=mock`
   - if using 0x mode, confirm chain is supported and verify `ZEROX_API_URL` + API key
-  - confirm `USDC_ADDRESS_BASE`
+  - confirm `DAO_TOKEN_ADDRESS_BASE`
 - Agent tx reverts:
-  - ensure agents are funded and bonded
+  - ensure agents are funded with HLX (bonding is optional)
   - ensure executor/forum addresses are correct
 
 ## 6) Reset local DB

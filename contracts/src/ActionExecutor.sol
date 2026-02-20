@@ -14,8 +14,9 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     enum ActionType {
-        SWAP_USDC_TO_TOKEN,
-        TRANSFER_USDC
+        SWAP_TREASURY_TOKEN_TO_TOKEN,
+        TRANSFER_TREASURY_TOKEN,
+        UPDATE_GOVERNANCE_CONFIG
     }
 
     enum ActionStatus {
@@ -44,7 +45,15 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         uint32 uniqueSupporters;
     }
 
-    IERC20 public immutable usdc;
+    struct GovernanceConfigPayload {
+        uint256 supportStakeThreshold;
+        uint256 uniqueSupportersThreshold;
+        uint256 supportBpsThreshold;
+        uint256 votingWindow;
+        bool exists;
+    }
+
+    IERC20 public immutable treasuryToken;
     IStakeVault public immutable stakeVault;
     IReputation public immutable reputation;
 
@@ -57,6 +66,7 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
     uint256 public votingWindow = 6 hours;
 
     mapping(uint256 => Action) public actions;
+    mapping(uint256 => GovernanceConfigPayload) public governanceConfigPayloads;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
     mapping(address => bool) public whitelistedTargets;
     mapping(bytes4 => bool) public whitelistedSelectors;
@@ -83,6 +93,13 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         bytes data
     );
     event ActionStatusUpdated(uint256 indexed actionId, ActionStatus status);
+    event GovernanceConfigActionCreated(
+        uint256 indexed actionId,
+        uint256 supportStakeThreshold,
+        uint256 uniqueSupportersThreshold,
+        uint256 supportBpsThreshold,
+        uint256 votingWindow
+    );
     event TargetWhitelistUpdated(address indexed target, bool allowed);
     event SelectorWhitelistUpdated(bytes4 indexed selector, bool allowed);
     event ThresholdsUpdated(uint256 supportStake, uint256 uniqueSupporters, uint256 supportBps);
@@ -97,6 +114,7 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
     error ActionExpired();
     error NotSwapAction();
     error NotTransferAction();
+    error NotGovernanceConfigAction();
     error ActionNotExecutable();
     error UnsafeTarget();
     error UnsafeSelector();
@@ -108,14 +126,14 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
 
     constructor(
         address owner_,
-        address usdc_,
+        address treasuryToken_,
         address stakeVault_,
         address reputation_,
         address forum_
     ) Ownable(owner_) {
-        if (usdc_ == address(0) || stakeVault_ == address(0) || reputation_ == address(0)) revert InvalidConfig();
+        if (treasuryToken_ == address(0) || stakeVault_ == address(0) || reputation_ == address(0)) revert InvalidConfig();
 
-        usdc = IERC20(usdc_);
+        treasuryToken = IERC20(treasuryToken_);
         stakeVault = IStakeVault(stakeVault_);
         reputation = IReputation(reputation_);
         forum = forum_;
@@ -133,10 +151,10 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
 
         ActionType actionType;
         if (tokenOut == address(0)) {
-            actionType = ActionType.TRANSFER_USDC;
+            actionType = ActionType.TRANSFER_TREASURY_TOKEN;
             if (minAmountOut != 0 || calldataHash != bytes32(0)) revert InvalidAction();
         } else {
-            actionType = ActionType.SWAP_USDC_TO_TOKEN;
+            actionType = ActionType.SWAP_TREASURY_TOKEN_TO_TOKEN;
             if (calldataHash == bytes32(0)) revert InvalidAction();
         }
 
@@ -170,6 +188,66 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
             minAmountOut,
             deadline,
             calldataHash
+        );
+    }
+
+    function createGovernanceConfigAction(
+        uint256 postId,
+        uint256 supportStakeThreshold_,
+        uint256 uniqueSupportersThreshold_,
+        uint256 supportBpsThreshold_,
+        uint256 votingWindow_,
+        uint256 deadline
+    ) external override whenNotPaused returns (uint256 actionId) {
+        if (deadline <= block.timestamp) revert InvalidAction();
+        _validateThresholdConfig(supportStakeThreshold_, uniqueSupportersThreshold_, supportBpsThreshold_);
+        _validateVotingWindow(votingWindow_);
+
+        actionId = nextActionId;
+        nextActionId += 1;
+
+        actions[actionId] = Action({
+            id: actionId,
+            postId: postId,
+            proposer: msg.sender,
+            actionType: ActionType.UPDATE_GOVERNANCE_CONFIG,
+            tokenOut: address(0),
+            amountIn: 0,
+            minAmountOut: 0,
+            deadline: deadline,
+            calldataHash: bytes32(0),
+            status: ActionStatus.CREATED,
+            createdAt: uint64(block.timestamp),
+            executedAt: 0,
+            supportStake: 0,
+            opposeStake: 0,
+            uniqueSupporters: 0
+        });
+
+        governanceConfigPayloads[actionId] = GovernanceConfigPayload({
+            supportStakeThreshold: supportStakeThreshold_,
+            uniqueSupportersThreshold: uniqueSupportersThreshold_,
+            supportBpsThreshold: supportBpsThreshold_,
+            votingWindow: votingWindow_,
+            exists: true
+        });
+
+        emit ActionCreated(
+            actionId,
+            postId,
+            msg.sender,
+            uint8(ActionType.UPDATE_GOVERNANCE_CONFIG),
+            0,
+            0,
+            deadline,
+            bytes32(0)
+        );
+        emit GovernanceConfigActionCreated(
+            actionId,
+            supportStakeThreshold_,
+            uniqueSupportersThreshold_,
+            supportBpsThreshold_,
+            votingWindow_
         );
     }
 
@@ -217,7 +295,7 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         whenNotPaused
     {
         Action storage action = actions[actionId];
-        if (action.actionType != ActionType.SWAP_USDC_TO_TOKEN) revert NotSwapAction();
+        if (action.actionType != ActionType.SWAP_TREASURY_TOKEN_TO_TOKEN) revert NotSwapAction();
 
         _preExecutionChecks(action);
 
@@ -231,7 +309,7 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
 
         uint256 balanceBefore = IERC20(action.tokenOut).balanceOf(address(this));
 
-        usdc.forceApprove(target, action.amountIn);
+        treasuryToken.forceApprove(target, action.amountIn);
         (bool ok, bytes memory result) = target.call(callData);
 
         if (!ok) {
@@ -264,12 +342,12 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         whenNotPaused
     {
         Action storage action = actions[actionId];
-        if (action.actionType != ActionType.TRANSFER_USDC) revert NotTransferAction();
+        if (action.actionType != ActionType.TRANSFER_TREASURY_TOKEN) revert NotTransferAction();
         if (to == address(0) || amount == 0 || amount > action.amountIn) revert InvalidAction();
 
         _preExecutionChecks(action);
 
-        usdc.safeTransfer(to, amount);
+        treasuryToken.safeTransfer(to, amount);
 
         action.status = ActionStatus.EXECUTED;
         action.executedAt = uint64(block.timestamp);
@@ -277,6 +355,42 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
 
         emit ActionStatusUpdated(actionId, ActionStatus.EXECUTED);
         emit ActionExecuted(actionId, uint8(action.actionType), true, amount, msg.sender, "");
+    }
+
+    function executeGovernanceConfig(uint256 actionId) external override nonReentrant whenNotPaused {
+        Action storage action = actions[actionId];
+        if (action.actionType != ActionType.UPDATE_GOVERNANCE_CONFIG) revert NotGovernanceConfigAction();
+
+        _preExecutionChecks(action);
+
+        GovernanceConfigPayload memory payload = governanceConfigPayloads[actionId];
+        if (!payload.exists) revert InvalidAction();
+
+        _applyGovernanceConfig(
+            payload.supportStakeThreshold,
+            payload.uniqueSupportersThreshold,
+            payload.supportBpsThreshold,
+            payload.votingWindow
+        );
+
+        action.status = ActionStatus.EXECUTED;
+        action.executedAt = uint64(block.timestamp);
+        reputation.recordAction(action.proposer, true);
+
+        emit ActionStatusUpdated(actionId, ActionStatus.EXECUTED);
+        emit ActionExecuted(
+            actionId,
+            uint8(action.actionType),
+            true,
+            0,
+            msg.sender,
+            abi.encode(
+                payload.supportStakeThreshold,
+                payload.uniqueSupportersThreshold,
+                payload.supportBpsThreshold,
+                payload.votingWindow
+            )
+        );
     }
 
     function markExpired(uint256 actionId) external {
@@ -337,7 +451,7 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
     }
 
     function setThresholds(uint256 supportStake, uint256 uniqueSupporters, uint256 supportBps) external onlyOwner {
-        if (supportBps > 10_000 || supportBps == 0) revert InvalidConfig();
+        _validateThresholdConfig(supportStake, uniqueSupporters, supportBps);
         supportStakeThreshold = supportStake;
         uniqueSupportersThreshold = uniqueSupporters;
         supportBpsThreshold = supportBps;
@@ -345,7 +459,7 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
     }
 
     function setVotingWindow(uint256 votingWindow_) external onlyOwner {
-        if (votingWindow_ < 1 hours || votingWindow_ > 7 days) revert InvalidConfig();
+        _validateVotingWindow(votingWindow_);
         votingWindow = votingWindow_;
         emit VotingWindowUpdated(votingWindow_);
     }
@@ -379,6 +493,32 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         action.executedAt = uint64(block.timestamp);
         reputation.recordAction(proposer, false);
         emit ActionStatusUpdated(actionId, ActionStatus.FAILED);
+    }
+
+    function _applyGovernanceConfig(
+        uint256 supportStake,
+        uint256 uniqueSupporters,
+        uint256 supportBps,
+        uint256 votingWindow_
+    ) internal {
+        _validateThresholdConfig(supportStake, uniqueSupporters, supportBps);
+        _validateVotingWindow(votingWindow_);
+
+        supportStakeThreshold = supportStake;
+        uniqueSupportersThreshold = uniqueSupporters;
+        supportBpsThreshold = supportBps;
+        votingWindow = votingWindow_;
+
+        emit ThresholdsUpdated(supportStake, uniqueSupporters, supportBps);
+        emit VotingWindowUpdated(votingWindow_);
+    }
+
+    function _validateThresholdConfig(uint256 supportStake, uint256 uniqueSupporters, uint256 supportBps) internal pure {
+        if (supportStake == 0 || uniqueSupporters == 0 || supportBps > 10_000 || supportBps == 0) revert InvalidConfig();
+    }
+
+    function _validateVotingWindow(uint256 votingWindow_) internal pure {
+        if (votingWindow_ < 1 hours || votingWindow_ > 7 days) revert InvalidConfig();
     }
 
     function _selector(bytes memory callData) internal pure returns (bytes4 selector) {

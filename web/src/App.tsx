@@ -40,21 +40,28 @@ type PostDetailsResponse = {
 type DaoShareMember = {
   address: string;
   handle: string | null;
+  walletBalance?: string;
   bondedBalance: string;
+  governanceBalance?: string;
   availableBalance: string;
   totalVotedStake: string;
   supportStake: string;
   bondedSharePct: number;
+  governanceSharePct?: number;
 };
 
 type DaoShareResponse = {
   members: DaoShareMember[];
+  treasuryTokenSymbol?: string;
+  treasuryTokenDecimals?: number;
 };
 
 type ActionDraftResponse = {
   calldataHash: string;
   simulation: { status: string; estimatedGas?: string; error?: string };
   riskChecks: Record<string, boolean>;
+  treasuryTokenSymbol?: string;
+  treasuryTokenDecimals?: number;
   quote: {
     buyAmount?: string;
     sellAmount?: string;
@@ -122,13 +129,14 @@ function relativeTime(iso: string): string {
   return `${Math.floor(diffHours / 24)}d ago`;
 }
 
-function formatUnits6(value: string | null): string {
+function formatTokenUnits(value: string | null, decimals: number): string {
   if (!value) return '0';
 
   try {
     const amount = BigInt(value);
-    const whole = amount / 1_000_000n;
-    const frac = (amount % 1_000_000n).toString().padStart(6, '0').replace(/0+$/, '');
+    const base = 10n ** BigInt(decimals);
+    const whole = amount / base;
+    const frac = (amount % base).toString().padStart(decimals, '0').replace(/0+$/, '');
     return frac.length > 0 ? `${whole.toString()}.${frac}` : whole.toString();
   } catch {
     return value;
@@ -139,11 +147,84 @@ function postKarma(postId: number): number {
   return 20 + (postId % 17);
 }
 
+function sharePct(member: DaoShareMember): number {
+  if (typeof member.governanceSharePct === 'number') return member.governanceSharePct;
+  return member.bondedSharePct;
+}
+
+function shareBalance(member: DaoShareMember): string {
+  return member.governanceBalance ?? member.bondedBalance;
+}
+
+function hashIdentity(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function avatarSeed(address: string, handle?: string | null): string {
+  const normalizedHandle = handle?.trim().toLowerCase();
+  if (normalizedHandle) return normalizedHandle;
+  return address.trim().toLowerCase();
+}
+
+function buildIdenticonSvg(seed: string): string {
+  const normalized = seed.trim().toLowerCase() || 'agentra';
+  const baseHash = hashIdentity(normalized);
+  const hue = baseHash % 360;
+  const saturation = 58 + (baseHash % 25);
+  const lightness = 34 + (baseHash % 15);
+  const fillColor = `hsl(${hue} ${saturation}% ${lightness}%)`;
+  const backgroundColor = `hsl(${hue} 45% 94%)`;
+
+  let state = baseHash || 1;
+  const nextBit = () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) & 1;
+  };
+
+  const cellSize = 10;
+  const gridSize = 5;
+  const canvas = cellSize * gridSize;
+  let cells = '';
+
+  for (let y = 0; y < gridSize; y += 1) {
+    for (let x = 0; x < Math.ceil(gridSize / 2); x += 1) {
+      if (nextBit() === 0) continue;
+      const mirrorX = gridSize - 1 - x;
+      cells += `<rect x="${x * cellSize}" y="${y * cellSize}" width="${cellSize}" height="${cellSize}" />`;
+      if (mirrorX !== x) {
+        cells += `<rect x="${mirrorX * cellSize}" y="${y * cellSize}" width="${cellSize}" height="${cellSize}" />`;
+      }
+    }
+  }
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvas} ${canvas}" shape-rendering="crispEdges">
+      <rect width="${canvas}" height="${canvas}" fill="${backgroundColor}" />
+      <g fill="${fillColor}">${cells}</g>
+    </svg>
+  `.trim();
+}
+
+function avatarDataUrl(seed: string): string {
+  return `data:image/svg+xml;utf8,${encodeURIComponent(buildIdenticonSvg(seed))}`;
+}
+
+function Avatar({ seed, alt, size = 20 }: { seed: string; alt: string; size?: number }) {
+  return <img alt={alt} className="avatar" height={size} loading="lazy" src={avatarDataUrl(seed)} width={size} />;
+}
+
 function ShareFlare({ author, daoShareByAddress }: { author: string; daoShareByAddress: DaoShareLookup }) {
   const member = daoShareByAddress[author.toLowerCase()];
   if (!member) return null;
 
-  return <span className="user-flare">{member.bondedSharePct.toFixed(2)}% share</span>;
+  return <span className="user-flare">{sharePct(member).toFixed(2)}% share</span>;
 }
 
 function buildCommentTree(comments: PostComment[]): CommentNode[] {
@@ -185,7 +266,14 @@ function CommentThread({ nodes, daoShareByAddress }: { nodes: CommentNode[]; dao
         <div className="comment-node" key={comment.id}>
           <div className="comment-card">
             <p className="comment-meta">
-              <strong>u/{formatAuthor(comment.author)}</strong>
+              <span className="comment-author">
+                <Avatar
+                  alt={`avatar for ${formatAuthor(comment.author)}`}
+                  seed={avatarSeed(comment.author, daoShareByAddress[comment.author.toLowerCase()]?.handle)}
+                  size={18}
+                />
+                <strong>u/{formatAuthor(comment.author)}</strong>
+              </span>
               <ShareFlare author={comment.author} daoShareByAddress={daoShareByAddress} /> {relativeTime(comment.created_at)}
               {comment.source === 'onchain' && <span className="comment-chip">agent</span>}
             </p>
@@ -214,6 +302,8 @@ export default function App() {
   const [selectedAction, setSelectedAction] = useState<ActionInspectorResponse | null>(null);
   const [draftResponse, setDraftResponse] = useState<ActionDraftResponse | null>(null);
   const [isDrafting, setIsDrafting] = useState(false);
+  const [treasuryTokenSymbol, setTreasuryTokenSymbol] = useState('HLX');
+  const [treasuryTokenDecimals, setTreasuryTokenDecimals] = useState(6);
   const [expandedCommentsByPost, setExpandedCommentsByPost] = useState<Record<number, boolean>>({});
   const [commentsByPost, setCommentsByPost] = useState<Record<number, PostComment[]>>({});
   const [loadingCommentsByPost, setLoadingCommentsByPost] = useState<Record<number, boolean>>({});
@@ -222,7 +312,7 @@ export default function App() {
   const [draftForm, setDraftForm] = useState({
     proposer: '0x0000000000000000000000000000000000000000',
     tokenOut: '0x4200000000000000000000000000000000000006',
-    amountInUSDC: '50000000',
+    amountInToken: '50000000',
     slippageBps: '100',
     deadlineSeconds: '3600',
   });
@@ -294,6 +384,12 @@ export default function App() {
 
       setDaoShareError('');
       setDaoShares(payload.members);
+      if (payload.treasuryTokenSymbol) {
+        setTreasuryTokenSymbol(payload.treasuryTokenSymbol);
+      }
+      if (typeof payload.treasuryTokenDecimals === 'number') {
+        setTreasuryTokenDecimals(payload.treasuryTokenDecimals);
+      }
     } catch (error) {
       setDaoShareError(error instanceof Error ? error.message : 'failed to load dao shares');
       setDaoShares([]);
@@ -428,10 +524,17 @@ export default function App() {
           {daoShares.length > 0 && (
             <div className="scroll-list">
               {daoShares.slice(0, 8).map((member) => (
-                <p className="mono small" key={member.address}>
-                  {(member.handle ?? shortAddress(member.address)).slice(0, 18)} :: {member.bondedSharePct.toFixed(2)}% ::{' '}
-                  {formatUnits6(member.bondedBalance)} USDC bonded
-                </p>
+                <div className="member-row" key={member.address}>
+                  <Avatar
+                    alt={`avatar for ${member.handle ?? shortAddress(member.address)}`}
+                    seed={avatarSeed(member.address, member.handle)}
+                    size={20}
+                  />
+                  <p className="mono small member-row-text">
+                    {(member.handle ?? shortAddress(member.address)).slice(0, 18)} :: {sharePct(member).toFixed(2)}% ::{' '}
+                    {formatTokenUnits(shareBalance(member), treasuryTokenDecimals)} {treasuryTokenSymbol} held
+                  </p>
+                </div>
               ))}
             </div>
           )}
@@ -528,10 +631,10 @@ export default function App() {
                 />
               </label>
               <label>
-                Amount In USDC (6 decimals)
+                Amount In {treasuryTokenSymbol} ({treasuryTokenDecimals} decimals)
                 <input
-                  onChange={(event) => setDraftForm((f) => ({ ...f, amountInUSDC: event.target.value }))}
-                  value={draftForm.amountInUSDC}
+                  onChange={(event) => setDraftForm((f) => ({ ...f, amountInToken: event.target.value }))}
+                  value={draftForm.amountInToken}
                 />
               </label>
               <label>
@@ -559,6 +662,7 @@ export default function App() {
                 <p>
                   simulation: <strong>{draftResponse.simulation.status}</strong>
                 </p>
+                {draftResponse.treasuryTokenSymbol && <p>treasury token: {draftResponse.treasuryTokenSymbol}</p>}
                 {draftResponse.simulation.estimatedGas && <p>estimated gas: {draftResponse.simulation.estimatedGas}</p>}
                 {draftResponse.simulation.error && <p className="error">{draftResponse.simulation.error}</p>}
               </div>

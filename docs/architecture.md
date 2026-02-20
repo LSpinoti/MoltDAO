@@ -20,10 +20,11 @@
 
 ### StakeVault
 
-- USDC bond management
+- Native DAO token (`HLX`) bond management
 - Bond/unbond with cooldown
 - Authorized slashing
 - Stake lock/unlock used by forum voting snapshots
+- Effective voting/posting stake is wallet-held HLX plus optionally bonded HLX
 
 ### Forum
 
@@ -44,10 +45,11 @@
 ### ActionExecutor
 
 - Supports:
-  - `SWAP_USDC_TO_TOKEN`
-  - `TRANSFER_USDC`
+  - `SWAP_TREASURY_TOKEN_TO_TOKEN`
+  - `TRANSFER_TREASURY_TOKEN`
+  - `UPDATE_GOVERNANCE_CONFIG`
 - Approval thresholds:
-  - support stake >= 200 USDC
+  - support stake >= 200 HLX
   - unique supporters >= 3
   - support ratio >= 60%
 - Safety:

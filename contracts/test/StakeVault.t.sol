@@ -3,10 +3,10 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {StakeVault} from "../src/StakeVault.sol";
-import {MockUSDC} from "../src/mocks/MockUSDC.sol";
+import {MockGovernanceToken} from "../src/mocks/MockGovernanceToken.sol";
 
 contract StakeVaultTest is Test {
-    MockUSDC internal usdc;
+    MockGovernanceToken internal daoToken;
     StakeVault internal vault;
 
     address internal owner = makeAddr("owner");
@@ -16,17 +16,17 @@ contract StakeVaultTest is Test {
     address internal slashReceiver = makeAddr("slashReceiver");
 
     function setUp() public {
-        usdc = new MockUSDC();
-        vault = new StakeVault(owner, address(usdc), slashReceiver, 5e6, 50e6);
+        daoToken = new MockGovernanceToken();
+        vault = new StakeVault(owner, address(daoToken), slashReceiver, 5e6, 50e6);
 
         vm.startPrank(owner);
         vault.setLocker(forum, true);
         vault.setSlasher(slasher, true);
         vm.stopPrank();
 
-        usdc.mint(alice, 200e6);
+        daoToken.mint(alice, 200e6);
         vm.prank(alice);
-        usdc.approve(address(vault), type(uint256).max);
+        daoToken.approve(address(vault), type(uint256).max);
     }
 
     function test_BondRequestUnbondFinalize() public {
@@ -57,12 +57,28 @@ contract StakeVaultTest is Test {
         vm.prank(forum);
         vault.lockStake(alice, 25e6);
 
-        assertEq(vault.availableBalance(alice), 75e6);
+        assertEq(vault.availableBalance(alice), 175e6);
 
         vm.prank(slasher);
         vault.slash(alice, 20e6, keccak256("spam"));
 
         assertEq(vault.bondedBalance(alice), 80e6);
-        assertEq(usdc.balanceOf(slashReceiver), 20e6);
+        assertEq(daoToken.balanceOf(slashReceiver), 20e6);
+    }
+
+    function test_AvailableBalanceIncludesWalletHoldingsWithoutBond() public {
+        vm.prank(forum);
+        vault.lockStake(alice, 50e6);
+
+        assertEq(vault.availableBalance(alice), 150e6);
+    }
+
+    function test_RequestUnbondCannotExceedBondedBalance() public {
+        vm.prank(alice);
+        vault.bond(100e6);
+
+        vm.prank(alice);
+        vm.expectRevert(StakeVault.InsufficientAvailableBalance.selector);
+        vault.requestUnbond(150e6);
     }
 }

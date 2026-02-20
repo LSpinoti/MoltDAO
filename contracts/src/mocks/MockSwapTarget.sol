@@ -7,17 +7,17 @@ import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/Safe
 contract MockSwapTarget {
     using SafeERC20 for IERC20;
 
-    IERC20 public immutable usdc;
+    IERC20 public immutable treasuryToken;
 
-    constructor(address usdc_) {
-        usdc = IERC20(usdc_);
+    constructor(address treasuryToken_) {
+        treasuryToken = IERC20(treasuryToken_);
     }
 
-    function swapExactUSDCForToken(address tokenOut, uint256 amountIn, uint256 amountOut, address recipient)
+    function swapExactTreasuryTokenForToken(address tokenOut, uint256 amountIn, uint256 amountOut, address recipient)
         external
         returns (uint256)
     {
-        usdc.safeTransferFrom(msg.sender, address(this), amountIn);
+        treasuryToken.safeTransferFrom(msg.sender, address(this), amountIn);
         IERC20(tokenOut).safeTransfer(recipient, amountOut);
         return amountOut;
     }

@@ -1,12 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage:
+  ./scripts/bond.sh [amount_token]
+
+Examples:
+  ./scripts/bond.sh 1
+  ./scripts/bond.sh '$1'
+  BOND_TOKEN=1 ./scripts/bond.sh
+EOF
+  exit 0
+fi
+
+if [[ $# -gt 1 ]]; then
+  echo "Usage: ./scripts/bond.sh [amount_token]" >&2
+  exit 1
+fi
+
+amount_input="${1:-${BOND_TOKEN:-${BOND_USDC:-1}}}"
+amount_input="${amount_input#\$}"
+
+if ! [[ "${amount_input}" =~ ^[0-9]+([.][0-9]{1,18})?$ ]]; then
+  echo "Invalid amount '${amount_input}'. Use a token value like 3 or 3.5" >&2
+  exit 1
+fi
+
+if [[ "${amount_input}" == "0" || "${amount_input}" == "0.0" || "${amount_input}" == "0.00" || "${amount_input}" == "0.000000" ]]; then
+  echo "Amount must be greater than 0" >&2
+  exit 1
+fi
+
 cd /home/luka/Desktop/Agentra/services/api
 set -a
 source ../../.env
 set +a
 
-BOND_USDC="${BOND_USDC:-10}" node --input-type=module <<'EOF'
+BOND_TOKEN="${amount_input}" node --input-type=module <<'EOF'
 import { createPublicClient, createWalletClient, http, parseUnits } from 'viem';
 import { base, baseSepolia } from 'viem/chains';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -15,11 +46,18 @@ const chainId = Number(process.env.BASE_CHAIN_ID || '8453');
 const chain = chainId === 84532 ? baseSepolia : base;
 const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_RPC_URL;
 const stakeVault = process.env.STAKE_VAULT_ADDRESS;
-const usdc =
+const daoToken =
   chainId === 84532
-    ? process.env.USDC_ADDRESS_BASE_SEPOLIA || process.env.USDC_ADDRESS_BASE || process.env.USDC_ADDRESS
-    : process.env.USDC_ADDRESS_BASE || process.env.USDC_ADDRESS;
-const amount = parseUnits(process.env.BOND_USDC || '5', 6); // USDC has 6 decimals
+    ? process.env.DAO_TOKEN_ADDRESS_BASE_SEPOLIA || process.env.DAO_TOKEN_ADDRESS_BASE || process.env.DAO_TOKEN_ADDRESS || process.env.USDC_ADDRESS_BASE_SEPOLIA || process.env.USDC_ADDRESS_BASE || process.env.USDC_ADDRESS
+    : process.env.DAO_TOKEN_ADDRESS_BASE || process.env.DAO_TOKEN_ADDRESS || process.env.USDC_ADDRESS_BASE || process.env.USDC_ADDRESS;
+const tokenDecimals = Number(process.env.DAO_TOKEN_DECIMALS || '6');
+const tokenSymbol = process.env.DAO_TOKEN_SYMBOL || 'HLX';
+const amountInput = process.env.BOND_TOKEN || '1';
+const amount = parseUnits(amountInput, tokenDecimals);
+if (amount <= 0n) {
+  throw new Error('BOND_TOKEN must be greater than 0');
+}
+console.log(`Bond amount configured: ${amountInput} ${tokenSymbol}`);
 
 if (!rpcUrl) {
   throw new Error('BASE_SEPOLIA_RPC_URL or BASE_RPC_URL must be set');
@@ -27,18 +65,30 @@ if (!rpcUrl) {
 if (!stakeVault) {
   throw new Error('STAKE_VAULT_ADDRESS must be set');
 }
-if (!usdc) {
-  throw new Error('USDC address env var is missing');
+if (!daoToken) {
+  throw new Error('DAO token address env var is missing');
 }
 
 const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
-const keys = (process.env.AGENT_PRIVATE_KEYS || '')
+let keys = (process.env.AGENT_PRIVATE_KEYS || '')
   .split(',')
   .map((k) => k.trim())
   .filter(Boolean);
 
 if (keys.length === 0) {
-  console.log('No AGENT_PRIVATE_KEYS configured; nothing to bond');
+  const { readFileSync } = await import('fs');
+  const { resolve } = await import('path');
+  const agentsPath = resolve(process.cwd(), '../../agents.txt');
+  try {
+    const content = readFileSync(agentsPath, 'utf-8');
+    keys = content.split('\n').map((k) => k.trim()).filter(Boolean).map((k) => k.startsWith('0x') ? k : '0x' + k);
+  } catch {
+    /* ignore */
+  }
+}
+
+if (keys.length === 0) {
+  console.log('No AGENT_PRIVATE_KEYS or agents.txt configured; nothing to bond');
   process.exit(0);
 }
 
@@ -124,7 +174,7 @@ async function writeWithRetry(walletClient, account, buildRequest) {
 
 async function readAllowance(agentAddress) {
   return await publicClient.readContract({
-    address: usdc,
+    address: daoToken,
     abi: erc20Abi,
     functionName: 'allowance',
     args: [agentAddress, stakeVault],
@@ -146,14 +196,14 @@ for (const raw of keys) {
   const walletClient = createWalletClient({ account, chain, transport: http(rpcUrl) });
 
   const bal = await publicClient.readContract({
-    address: usdc,
+    address: daoToken,
     abi: erc20Abi,
     functionName: 'balanceOf',
     args: [account.address],
   });
 
   if (bal < amount) {
-    console.log(`skip ${account.address}: USDC balance ${bal} < ${amount}`);
+    console.log(`skip ${account.address}: ${tokenSymbol} balance ${bal} < ${amount}`);
     continue;
   }
 
@@ -162,7 +212,7 @@ for (const raw of keys) {
   try {
     if (allowance < amount) {
       const approveTx = await writeWithRetry(walletClient, account, {
-        address: usdc,
+        address: daoToken,
         abi: erc20Abi,
         functionName: 'approve',
         args: [stakeVault, amount],

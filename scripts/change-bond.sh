@@ -1,6 +1,6 @@
 cd /home/luka/Desktop/Agentra/services/api
 set -a; source ../../.env; set +a
-POST_MIN_USDC=1 ACTION_MIN_USDC=10 node --input-type=module <<'EOF'
+POST_MIN_TOKEN=1 ACTION_MIN_TOKEN=2 node --input-type=module <<'EOF'
 import { createPublicClient, createWalletClient, http, parseUnits } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base, baseSepolia } from 'viem/chains';
@@ -13,9 +13,11 @@ const account = privateKeyToAccount(pk.startsWith('0x') ? pk : `0x${pk}`);
 const publicClient = createPublicClient({ chain, transport: http(process.env.BASE_RPC_URL) });
 const walletClient = createWalletClient({ account, chain, transport: http(process.env.BASE_RPC_URL) });
 
-const postMin = parseUnits(process.env.POST_MIN_USDC || '1', 6);      // USDC 6 decimals
-const actionMin = parseUnits(process.env.ACTION_MIN_USDC || '10', 6); // must be >= postMin
-if (actionMin < postMin) throw new Error('ACTION_MIN_USDC must be >= POST_MIN_USDC');
+const tokenDecimals = Number(process.env.DAO_TOKEN_DECIMALS || '6');
+const tokenSymbol = process.env.DAO_TOKEN_SYMBOL || 'HLX';
+const postMin = parseUnits(process.env.POST_MIN_TOKEN || process.env.POST_MIN_USDC || '1', tokenDecimals);
+const actionMin = parseUnits(process.env.ACTION_MIN_TOKEN || process.env.ACTION_MIN_USDC || '2', tokenDecimals);
+if (actionMin < postMin) throw new Error('ACTION_MIN_TOKEN must be >= POST_MIN_TOKEN');
 
 const abi = [
   { type: 'function', name: 'setBondMinimums', stateMutability: 'nonpayable', inputs: [{ type: 'uint256' }, { type: 'uint256' }], outputs: [] },
@@ -37,6 +39,5 @@ const [p, a] = await Promise.all([
   publicClient.readContract({ address: process.env.STAKE_VAULT_ADDRESS, abi, functionName: 'postBondMin' }),
   publicClient.readContract({ address: process.env.STAKE_VAULT_ADDRESS, abi, functionName: 'actionBondMin' }),
 ]);
-console.log({ postBondMin: p.toString(), actionBondMin: a.toString(), txHash: hash });
+console.log({ tokenSymbol, postBondMin: p.toString(), actionBondMin: a.toString(), txHash: hash });
 EOF
-

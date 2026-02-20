@@ -77,6 +77,13 @@ export const forumAbi = [
   { type: 'error', name: 'Unauthorized', inputs: [] },
   {
     type: 'function',
+    name: 'nextPostId',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
     name: 'createPost',
     stateMutability: 'nonpayable',
     inputs: [

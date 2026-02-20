@@ -15,7 +15,7 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
         uint64 unlockTime;
     }
 
-    IERC20 public immutable usdc;
+    IERC20 public immutable governanceToken;
     address public slashReceiver;
     uint256 public unbondCooldown = 24 hours;
 
@@ -59,16 +59,16 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
 
     constructor(
         address owner_,
-        address usdc_,
+        address token_,
         address slashReceiver_,
         uint256 postBondMin_,
         uint256 actionBondMin_
     ) Ownable(owner_) {
-        require(usdc_ != address(0), "usdc");
+        require(token_ != address(0), "token");
         require(slashReceiver_ != address(0), "receiver");
         require(actionBondMin_ >= postBondMin_, "min");
 
-        usdc = IERC20(usdc_);
+        governanceToken = IERC20(token_);
         slashReceiver = slashReceiver_;
         postBondMin = postBondMin_;
         actionBondMin = actionBondMin_;
@@ -78,16 +78,18 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
         if (amount == 0) revert AmountZero();
 
         _bonded[msg.sender] += amount;
-        usdc.safeTransferFrom(msg.sender, address(this), amount);
+        governanceToken.safeTransferFrom(msg.sender, address(this), amount);
 
         emit Bonded(msg.sender, amount, _bonded[msg.sender]);
     }
 
     function requestUnbond(uint256 amount) external override whenNotPaused {
         if (amount == 0) revert AmountZero();
-        if (availableBalance(msg.sender) < amount) revert InsufficientAvailableBalance();
 
         UnbondRequest storage request = unbondRequests[msg.sender];
+        uint256 bonded = _bonded[msg.sender];
+        if (bonded < request.amount || bonded - request.amount < amount) revert InsufficientAvailableBalance();
+
         request.amount += amount;
         request.unlockTime = uint64(block.timestamp + unbondCooldown);
 
@@ -102,7 +104,7 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
         delete unbondRequests[msg.sender];
         _bonded[msg.sender] -= request.amount;
 
-        usdc.safeTransfer(msg.sender, request.amount);
+        governanceToken.safeTransfer(msg.sender, request.amount);
 
         emit UnbondFinalized(msg.sender, request.amount, _bonded[msg.sender]);
     }
@@ -116,17 +118,12 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
 
         _bonded[agent] = bonded - slashed;
 
-        if (_locked[agent] > _bonded[agent]) {
-            _locked[agent] = _bonded[agent];
-        }
-
         UnbondRequest storage request = unbondRequests[agent];
-        uint256 maxRequest = _bonded[agent] - _locked[agent];
-        if (request.amount > maxRequest) {
-            request.amount = maxRequest;
+        if (request.amount > _bonded[agent]) {
+            request.amount = _bonded[agent];
         }
 
-        usdc.safeTransfer(slashReceiver, slashed);
+        governanceToken.safeTransfer(slashReceiver, slashed);
 
         emit Slashed(agent, slashed, reason, slashReceiver);
     }
@@ -156,12 +153,14 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
     }
 
     function availableBalance(address agent) public view override returns (uint256) {
+        // Agents can use either wallet-held HLX or vault-bonded HLX as voting/posting stake.
         uint256 bonded = _bonded[agent];
+        uint256 wallet = governanceToken.balanceOf(agent);
         uint256 locked = _locked[agent];
-        uint256 requested = unbondRequests[agent].amount;
+        uint256 totalStake = bonded + wallet;
 
-        if (bonded <= locked + requested) return 0;
-        return bonded - locked - requested;
+        if (totalStake <= locked) return 0;
+        return totalStake - locked;
     }
 
     function setSlasher(address account, bool allowed) external onlyOwner {

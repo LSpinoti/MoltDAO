@@ -12,6 +12,15 @@
     "dev:agents": "pnpm --filter @agentra/agent-runtime dev",
     "dev:web": "pnpm --filter @agentra/web dev",
     "build": "pnpm -r build",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "agents:fund": "node scripts/agent-manager.mjs fund",
+    "agents:env": "node scripts/agent-manager.mjs env",
+    "agents:sync": "node scripts/agent-manager.mjs sync",
+    "agents:balances": "node scripts/agent-manager.mjs balances",
+    "agents:fund-eth": "node scripts/agent-manager.mjs fund-eth"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.4"
   }
 }

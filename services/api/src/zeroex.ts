@@ -12,7 +12,7 @@ import { rpcTransport } from './rpcTransport.js';
 export type DraftActionInput = {
   proposer: Address;
   tokenOut: Address;
-  amountInUSDC: bigint;
+  amountInToken: bigint;
   slippageBps: number;
   deadlineSeconds: number;
 };
@@ -56,16 +56,16 @@ function resolveQuoteProvider(): QuoteProvider {
 }
 
 async function draftZeroxSwapAction(input: DraftActionInput) {
-  const usdc = env.USDC_ADDRESS_BASE as Address | undefined;
-  if (!usdc) {
-    throw new Error('USDC_ADDRESS_BASE is not configured');
+  const treasuryToken = resolveTreasuryTokenAddress();
+  if (!treasuryToken) {
+    throw new Error('DAO_TOKEN_ADDRESS_BASE is not configured');
   }
 
   const requestUrl = new URL(env.ZEROX_API_URL);
   requestUrl.searchParams.set('chainId', String(env.BASE_CHAIN_ID));
-  requestUrl.searchParams.set('sellToken', usdc);
+  requestUrl.searchParams.set('sellToken', treasuryToken);
   requestUrl.searchParams.set('buyToken', input.tokenOut);
-  requestUrl.searchParams.set('sellAmount', input.amountInUSDC.toString());
+  requestUrl.searchParams.set('sellAmount', input.amountInToken.toString());
   requestUrl.searchParams.set('slippageBps', String(input.slippageBps));
   requestUrl.searchParams.set('taker', env.ACTION_EXECUTOR_ADDRESS ?? input.proposer);
 
@@ -119,9 +119,9 @@ async function draftZeroxSwapAction(input: DraftActionInput) {
 }
 
 async function draftMockSwapAction(input: DraftActionInput) {
-  const usdc = env.USDC_ADDRESS_BASE as Address | undefined;
-  if (!usdc) {
-    throw new Error('USDC_ADDRESS_BASE is not configured');
+  const treasuryToken = resolveTreasuryTokenAddress();
+  if (!treasuryToken) {
+    throw new Error('DAO_TOKEN_ADDRESS_BASE is not configured');
   }
 
   const target = (env.MOCK_SWAP_TARGET ??
@@ -138,7 +138,7 @@ async function draftMockSwapAction(input: DraftActionInput) {
     ],
     [
       input.tokenOut,
-      input.amountInUSDC,
+      input.amountInToken,
       BigInt(input.slippageBps),
       BigInt(input.deadlineSeconds),
       mockTaker,
@@ -152,9 +152,9 @@ async function draftMockSwapAction(input: DraftActionInput) {
   const quote = {
     provider: 'mock',
     chainId: env.BASE_CHAIN_ID,
-    sellToken: usdc,
+    sellToken: treasuryToken,
     buyToken: input.tokenOut,
-    sellAmount: input.amountInUSDC.toString(),
+    sellAmount: input.amountInToken.toString(),
     buyAmount: '1',
     liquidityAvailable: false,
     transaction: {
@@ -182,6 +182,10 @@ async function draftMockSwapAction(input: DraftActionInput) {
     },
     riskChecks,
   };
+}
+
+function resolveTreasuryTokenAddress(): Address | undefined {
+  return (env.DAO_TOKEN_ADDRESS_BASE ?? env.USDC_ADDRESS_BASE) as Address | undefined;
 }
 
 async function simulateSwapCall(to: Address, data: Hex) {

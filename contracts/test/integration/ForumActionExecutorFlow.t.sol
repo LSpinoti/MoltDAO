@@ -7,7 +7,7 @@ import {StakeVault} from "../../src/StakeVault.sol";
 import {Reputation} from "../../src/Reputation.sol";
 import {Forum} from "../../src/Forum.sol";
 import {ActionExecutor} from "../../src/ActionExecutor.sol";
-import {MockUSDC} from "../../src/mocks/MockUSDC.sol";
+import {MockGovernanceToken} from "../../src/mocks/MockGovernanceToken.sol";
 import {MockERC20} from "../../src/mocks/MockERC20.sol";
 import {MockSwapTarget} from "../../src/mocks/MockSwapTarget.sol";
 
@@ -18,7 +18,7 @@ contract ForumActionExecutorFlowTest is Test {
     Forum internal forum;
     ActionExecutor internal executor;
 
-    MockUSDC internal usdc;
+    MockGovernanceToken internal daoToken;
     MockERC20 internal tokenOut;
     MockSwapTarget internal swapTarget;
 
@@ -30,13 +30,13 @@ contract ForumActionExecutorFlowTest is Test {
     address internal dave = makeAddr("dave");
 
     function setUp() public {
-        usdc = new MockUSDC();
+        daoToken = new MockGovernanceToken();
         tokenOut = new MockERC20("Mock ETH", "mETH");
 
         registry = new AgentRegistry(owner);
-        stakeVault = new StakeVault(owner, address(usdc), slashReceiver, 5e6, 50e6);
+        stakeVault = new StakeVault(owner, address(daoToken), slashReceiver, 5e6, 50e6);
         reputation = new Reputation(owner, address(stakeVault));
-        executor = new ActionExecutor(owner, address(usdc), address(stakeVault), address(reputation), address(0));
+        executor = new ActionExecutor(owner, address(daoToken), address(stakeVault), address(reputation), address(0));
         forum = new Forum(owner, address(stakeVault), address(reputation), address(executor));
 
         vm.startPrank(owner);
@@ -44,16 +44,16 @@ contract ForumActionExecutorFlowTest is Test {
         reputation.setWriter(address(forum), true);
         reputation.setWriter(address(executor), true);
         stakeVault.setLocker(address(forum), true);
-        swapTarget = new MockSwapTarget(address(usdc));
+        swapTarget = new MockSwapTarget(address(daoToken));
         executor.setWhitelistedTarget(address(swapTarget), true);
-        executor.setWhitelistedSelector(MockSwapTarget.swapExactUSDCForToken.selector, true);
+        executor.setWhitelistedSelector(MockSwapTarget.swapExactTreasuryTokenForToken.selector, true);
         vm.stopPrank();
 
         _seedAgent(alice, "alice");
         _seedAgent(bob, "bob");
         _seedAgent(carol, "carol");
 
-        usdc.mint(address(executor), 1_000e6);
+        daoToken.mint(address(executor), 1_000e6);
         tokenOut.mint(address(swapTarget), 5_000 ether);
     }
 
@@ -75,7 +75,7 @@ contract ForumActionExecutorFlowTest is Test {
         forum.voteAction(actionId, true, 70e6);
 
         bytes memory routerCall = abi.encodeCall(
-            MockSwapTarget.swapExactUSDCForToken, (address(tokenOut), 50e6, 35 ether, address(executor))
+            MockSwapTarget.swapExactTreasuryTokenForToken, (address(tokenOut), 50e6, 35 ether, address(executor))
         );
         bytes memory swapCalldata = abi.encode(address(swapTarget), routerCall);
 
@@ -99,7 +99,7 @@ contract ForumActionExecutorFlowTest is Test {
         forum.voteAction(actionId, true, 70e6);
 
         bytes memory badRouterCall = abi.encodeCall(
-            MockSwapTarget.swapExactUSDCForToken, (address(tokenOut), 50e6, 1 ether, address(executor))
+            MockSwapTarget.swapExactTreasuryTokenForToken, (address(tokenOut), 50e6, 1 ether, address(executor))
         );
         bytes memory badSwapCalldata = abi.encode(address(swapTarget), badRouterCall);
 
@@ -108,7 +108,7 @@ contract ForumActionExecutorFlowTest is Test {
         executor.executeSwap(actionId, badSwapCalldata);
     }
 
-    function test_PostRequiresBond() public {
+    function test_PostRequiresStakeBalance() public {
         address noBond = makeAddr("nobond");
 
         vm.expectRevert(Forum.InsufficientBond.selector);
@@ -116,15 +116,42 @@ contract ForumActionExecutorFlowTest is Test {
         forum.createPost(keccak256("hello"), uint8(0), "");
     }
 
+    function test_HolderCanPostWithoutBonding() public {
+        address holder = makeAddr("holder");
+        daoToken.mint(holder, 10e6);
+
+        vm.prank(holder);
+        uint256 postId = forum.createPost(keccak256("holder-post"), uint8(0), "");
+        assertEq(postId, 1);
+    }
+
+    function test_ApprovedGovernanceConfigActionUpdatesThresholds() public {
+        uint256 actionId = _createGovernanceConfigAction(alice, 150e6, 2, 5_500, 12 hours, block.timestamp + 1 days);
+
+        vm.prank(alice);
+        forum.createPost(keccak256("governance config proposal"), uint8(1), abi.encode(actionId));
+
+        vm.prank(alice);
+        forum.voteAction(actionId, true, 70e6);
+        vm.prank(bob);
+        forum.voteAction(actionId, true, 70e6);
+        vm.prank(carol);
+        forum.voteAction(actionId, true, 70e6);
+
+        vm.prank(dave);
+        executor.executeGovernanceConfig(actionId);
+
+        assertEq(executor.supportStakeThreshold(), 150e6);
+        assertEq(executor.uniqueSupportersThreshold(), 2);
+        assertEq(executor.supportBpsThreshold(), 5_500);
+        assertEq(executor.votingWindow(), 12 hours);
+    }
+
     function _seedAgent(address agent, string memory handle) internal {
         vm.prank(agent);
         registry.registerAgent(agent, handle, keccak256(bytes(handle)));
 
-        usdc.mint(agent, 300e6);
-        vm.startPrank(agent);
-        usdc.approve(address(stakeVault), type(uint256).max);
-        stakeVault.bond(200e6);
-        vm.stopPrank();
+        daoToken.mint(agent, 300e6);
     }
 
     function _createSwapAction(address proposer, uint256 amountIn, uint256 minAmountOut, uint256 deadline)
@@ -132,7 +159,7 @@ contract ForumActionExecutorFlowTest is Test {
         returns (uint256)
     {
         bytes memory routerCall = abi.encodeCall(
-            MockSwapTarget.swapExactUSDCForToken, (address(tokenOut), amountIn, 35 ether, address(executor))
+            MockSwapTarget.swapExactTreasuryTokenForToken, (address(tokenOut), amountIn, 35 ether, address(executor))
         );
         bytes memory swapCalldata = abi.encode(address(swapTarget), routerCall);
 
@@ -140,5 +167,24 @@ contract ForumActionExecutorFlowTest is Test {
         uint256 actionId = executor.createAction(0, address(tokenOut), amountIn, minAmountOut, deadline, keccak256(swapCalldata));
 
         return actionId;
+    }
+
+    function _createGovernanceConfigAction(
+        address proposer,
+        uint256 supportStakeThreshold,
+        uint256 uniqueSupportersThreshold,
+        uint256 supportBpsThreshold,
+        uint256 votingWindow,
+        uint256 deadline
+    ) internal returns (uint256) {
+        vm.prank(proposer);
+        return executor.createGovernanceConfigAction(
+            0,
+            supportStakeThreshold,
+            uniqueSupportersThreshold,
+            supportBpsThreshold,
+            votingWindow,
+            deadline
+        );
     }
 }

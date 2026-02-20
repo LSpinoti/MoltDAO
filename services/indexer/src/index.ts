@@ -46,8 +46,9 @@ const actionStatusMap: Record<number, string> = {
 };
 
 const actionTypeMap: Record<number, string> = {
-  0: 'SWAP_USDC_TO_TOKEN',
-  1: 'TRANSFER_USDC',
+  0: 'SWAP_TREASURY_TOKEN_TO_TOKEN',
+  1: 'TRANSFER_TREASURY_TOKEN',
+  2: 'UPDATE_GOVERNANCE_CONFIG',
 };
 
 function sleep(ms: number): Promise<void> {

@@ -24,6 +24,8 @@ const EnvSchema = z.object({
   STAKE_VAULT_ADDRESS: z.string().optional(),
   ACTION_EXECUTOR_ADDRESS: z.string().optional(),
   TOKEN_OUT_ADDRESS: z.string().optional(),
+  DAO_TOKEN_SYMBOL: z.string().default('HLX'),
+  DAO_TOKEN_DECIMALS: z.coerce.number().int().min(6).max(18).default(6),
   AGENT_POST_INTERVAL_MS: z.coerce.number().default(120000),
 });
 

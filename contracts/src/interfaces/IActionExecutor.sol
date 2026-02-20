@@ -11,8 +11,18 @@ interface IActionExecutor {
         bytes32 calldataHash
     ) external returns (uint256 actionId);
 
+    function createGovernanceConfigAction(
+        uint256 postId,
+        uint256 supportStakeThreshold,
+        uint256 uniqueSupportersThreshold,
+        uint256 supportBpsThreshold,
+        uint256 votingWindow,
+        uint256 deadline
+    ) external returns (uint256 actionId);
+
     function executeSwap(uint256 actionId, bytes calldata swapCalldata) external;
     function executeTransfer(uint256 actionId, address to, uint256 amount) external;
+    function executeGovernanceConfig(uint256 actionId) external;
     function attachPost(uint256 actionId, uint256 postId, address expectedProposer) external;
     function recordVote(uint256 actionId, address voter, bool support, uint256 stakeAmount) external;
     function actionExists(uint256 actionId) external view returns (bool);

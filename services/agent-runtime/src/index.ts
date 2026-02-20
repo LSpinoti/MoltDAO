@@ -1,3 +1,6 @@
+import { readFileSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import OpenAI from 'openai';
 import {
   createPublicClient,
@@ -61,16 +64,21 @@ type DaoShareMember = {
   address: string;
   handle: string | null;
   bondedBalance: string;
+  walletBalance?: string;
+  governanceBalance?: string;
   availableBalance: string;
   totalVotedStake: string;
   supportStake: string;
   bondedShareBps: number;
   bondedSharePct: number;
+  governanceShareBps?: number;
+  governanceSharePct?: number;
 };
 
 type DaoSharesResponse = {
   members: DaoShareMember[];
   totalBonded: string;
+  totalGovernance?: string;
 };
 
 type AgentMemoryItem = {
@@ -110,11 +118,15 @@ const numericStringSchema = z
   .transform((value) => String(value))
   .pipe(z.string().regex(/^\d+$/));
 
+const planSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .transform((value) => value.replace(/[\s-]+/g, '_'))
+  .pipe(z.enum(['idle', 'post', 'comment', 'propose_action', 'vote']));
+
 const agentDecisionSchema = z.object({
-  plan: z.preprocess(
-    (value) => (typeof value === 'string' ? value.trim().toLowerCase().replace(/[\s-]+/g, '_') : value),
-    z.enum(['idle', 'post', 'comment', 'propose_action', 'vote']),
-  ),
+  plan: planSchema,
   rationale: z.string().trim().max(1000).optional(),
   memory: z
     .preprocess(
@@ -127,19 +139,20 @@ const agentDecisionSchema = z.object({
     .optional(),
   post: z
     .object({
-      title: z.string().trim().min(1).max(180),
-      body: z.string().trim().min(1).max(4000),
+      title: z.string().trim().min(1).max(180).optional(),
+      body: z.string().trim().min(1).max(4000).optional(),
     })
     .optional(),
   comment: z
     .object({
       postId: z.number().int().positive().optional(),
       replyToCommentId: z.number().int().positive().nullable().optional(),
-      body: z.string().trim().min(1).max(3000),
+      body: z.string().trim().min(1).max(3000).optional(),
     })
     .optional(),
   action: z
     .object({
+      amountInToken: numericStringSchema.optional(),
       amountInUSDC: numericStringSchema.optional(),
       slippageBps: z.number().int().min(1).max(2000).optional(),
       deadlineSeconds: z.number().int().min(300).max(24 * 60 * 60).optional(),
@@ -214,6 +227,16 @@ function errorToSearchableText(error: unknown): string {
     .join(' ');
 }
 
+function daoSharePct(member: DaoShareMember | null): number {
+  if (!member) return 0;
+  if (typeof member.governanceSharePct === 'number') return member.governanceSharePct;
+  return member.bondedSharePct;
+}
+
+function daoStakeBalance(member: DaoShareMember): string {
+  return member.governanceBalance ?? member.bondedBalance;
+}
+
 function isNonceConflictError(error: unknown): boolean {
   const text = errorToSearchableText(error);
   return (
@@ -222,6 +245,11 @@ function isNonceConflictError(error: unknown): boolean {
     text.includes('nonce too low') ||
     text.includes('already known')
   );
+}
+
+function isPostNotFoundError(error: unknown): boolean {
+  const text = errorToSearchableText(error);
+  return text.includes('postnotfound') || text.includes('post not found');
 }
 
 function errorMessage(error: unknown): string {
@@ -277,12 +305,14 @@ function isAddress(value: string | undefined): value is `0x${string}` {
   return Boolean(value && /^0x[a-fA-F0-9]{40}$/.test(value));
 }
 
-function formatUsdc(amount: bigint): string {
-  const whole = amount / 1_000_000n;
-  const fractional = amount % 1_000_000n;
+function formatTokenAmount(amount: bigint): string {
+  const decimals = BigInt(env.DAO_TOKEN_DECIMALS);
+  const base = 10n ** decimals;
+  const whole = amount / base;
+  const fractional = amount % base;
   if (fractional === 0n) return whole.toString();
 
-  const padded = fractional.toString().padStart(6, '0').replace(/0+$/, '');
+  const padded = fractional.toString().padStart(Number(decimals), '0').replace(/0+$/, '');
   return `${whole.toString()}.${padded}`;
 }
 
@@ -321,48 +351,364 @@ class AgentRunner {
     return `${title.trim()}\n\n${body.trim()}`;
   }
 
-  private buildFallbackDiscussionDraft(context: AgentContext): { title: string; body: string } {
-    const largest = context.daoShares[0];
-    const largestHandle = largest?.handle ?? (largest ? largest.address.slice(0, 10) : 'n/a');
-    const title = `Negotiation thread: coalition strategy for treasury actions`;
-    const body = [
-      `Representing my human holder, I want stronger coordination before the next action vote.`,
-      '',
-      `Current signal:`,
-      `- pending actions: ${context.pendingActionIds.length}`,
-      `- top bonded delegate: ${largestHandle}`,
-      `- my bonded share: ${context.selfShare?.bondedSharePct ?? 0}%`,
-      '',
-      `I am looking for explicit tradeoffs on slippage, timing, and coalition support before execution.`,
-      `${new Date().toISOString()}`,
-    ].join('\n');
+  private buildConversationTargets(context: AgentContext, account: Address): Array<{
+    postId: number;
+    title: string | null;
+    commentCount: number;
+    lastCommentAuthor: string | null;
+    lastCommentId: number | null;
+    recencyRank: number;
+    isOwnPost: boolean;
+    isActionThread: boolean;
+  }> {
+    const targets = context.feed.map((item, index) => {
+      const details = context.postDetails[item.id];
+      const comments = details?.comments ?? [];
+      const lastComment = comments[comments.length - 1] ?? null;
 
-    return { title, body };
+      return {
+        postId: item.id,
+        title: item.post_title,
+        commentCount: comments.length || item.comment_count,
+        lastCommentAuthor: lastComment?.author ?? null,
+        lastCommentId: lastComment?.id ?? null,
+        recencyRank: index,
+        isOwnPost: item.author.toLowerCase() === account.toLowerCase(),
+        isActionThread: item.post_type === 1 || item.action_id !== null,
+      };
+    });
+
+    return targets.filter((target) => target.commentCount > 0 || !target.isOwnPost);
   }
 
-  private buildFallbackCommentBody(targetTitle: string | null): string {
-    return [
-      `From my holder's perspective, I support progress but want clearer downside limits.`,
-      `Thread: ${targetTitle ?? 'Untitled post'}`,
-      `If high-share delegates disagree, please state the threshold that changes your vote.`,
-      `${new Date().toISOString()}`,
-    ].join('\n');
+  private getRecentCommentedPostIds(context: AgentContext, limit = 12): number[] {
+    return context.memories
+      .filter((memory) => memory.memory_type === 'outcome' && typeof memory.memory_text === 'string')
+      .map((memory) => {
+        const match = /comment created post=(\d+)/.exec(memory.memory_text);
+        return match ? Number(match[1]) : null;
+      })
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+      .slice(0, limit);
   }
 
-  private buildActionPostDraft(actionId: bigint, rationale: string, amountIn: bigint): { title: string; body: string } {
-    const title = `[Proposal #${actionId}] ${formatUsdc(amountIn)} USDC swap trial`;
-    const body = [
-      `Posting [Proposal #${actionId}] as an execution candidate from my holder's mandate.`,
-      '',
-      'Negotiation notes:',
-      `- ${rationale || 'execute cautiously with explicit limits and coalition visibility'}`,
-      '- seek multi-agent support proportional to DAO share concentration',
-      '- keep downside bounded via slippage + deadline guardrails',
-      '',
-      `${new Date().toISOString()}`,
-    ].join('\n');
+  private weightedRandomIndex(weights: number[]): number | null {
+    const total = weights.reduce((sum, weight) => sum + Math.max(0, weight), 0);
+    if (total <= 0) return null;
 
-    return { title, body };
+    let pick = Math.random() * total;
+    for (let i = 0; i < weights.length; i += 1) {
+      pick -= Math.max(0, weights[i] ?? 0);
+      if (pick <= 0) return i;
+    }
+
+    return weights.length > 0 ? weights.length - 1 : null;
+  }
+
+  private pickRandomRelevantThread(
+    context: AgentContext,
+    account: Address,
+    excludedPostIds: Set<number> = new Set(),
+  ): number | null {
+    const allTargets = this.buildConversationTargets(context, account).slice(0, 16);
+    if (allTargets.length === 0) return null;
+
+    const targets = allTargets.filter((target) => !excludedPostIds.has(target.postId));
+    const pool = targets.length > 0 ? targets : allTargets;
+    if (pool.length === 0) return null;
+
+    const recentCommented = this.getRecentCommentedPostIds(context, 14);
+    const recentCounts = new Map<number, number>();
+    for (const postId of recentCommented) {
+      recentCounts.set(postId, (recentCounts.get(postId) ?? 0) + 1);
+    }
+
+    // Force exploration at a meaningful rate so one active thread cannot monopolize all comments.
+    if (Math.random() < 0.35) {
+      const explorationPool = pool.slice(0, Math.min(10, pool.length));
+      if (explorationPool.length > 0) {
+        const index = Math.floor(Math.random() * explorationPool.length);
+        return explorationPool[index]?.postId ?? null;
+      }
+    }
+
+    const total = pool.length;
+    const mostRecent = recentCommented[0] ?? null;
+    const secondMostRecent = recentCommented[1] ?? null;
+    const thirdMostRecent = recentCommented[2] ?? null;
+
+    const weights = pool.map((target) => {
+      const recencyWeight = Math.max(0.15, (total - target.recencyRank) / total);
+      const discussionWeight = target.commentCount > 0 ? 1 + Math.min(target.commentCount, 10) * 0.18 : 0.85;
+      const actionWeight = target.isActionThread ? 1.1 : 1;
+      const ownPenalty = target.isOwnPost ? 0.7 : 1;
+      const crowdedPenalty = target.commentCount > 24 ? 0.35 : 1;
+
+      const recentCount = recentCounts.get(target.postId) ?? 0;
+      const repetitionPenalty = 1 / (1 + recentCount * 1.6);
+      const consecutivePenalty =
+        mostRecent === target.postId && secondMostRecent === target.postId
+          ? 0.015
+          : mostRecent === target.postId && thirdMostRecent === target.postId
+            ? 0.08
+            : mostRecent === target.postId
+              ? 0.22
+              : 1;
+
+      return recencyWeight * discussionWeight * actionWeight * ownPenalty * crowdedPenalty * repetitionPenalty * consecutivePenalty;
+    });
+
+    const picked = this.weightedRandomIndex(weights);
+    if (picked === null) return pool[0]?.postId ?? null;
+    return pool[picked]?.postId ?? null;
+  }
+
+  private getStickyThreadExclusions(context: AgentContext): Set<number> {
+    const recentCommented = this.getRecentCommentedPostIds(context, 10);
+    const excluded = new Set<number>();
+    if (recentCommented.length >= 2 && recentCommented[0] === recentCommented[1]) {
+      excluded.add(recentCommented[0]);
+    }
+
+    const counts = new Map<number, number>();
+    for (const postId of recentCommented) {
+      counts.set(postId, (counts.get(postId) ?? 0) + 1);
+    }
+
+    for (const [postId, count] of counts.entries()) {
+      if (count >= 4) {
+        excluded.add(postId);
+      }
+    }
+
+    return excluded;
+  }
+
+  private computeCommentDepths(comments: Array<{ id: number; parent_comment_id: number | null }>): Map<number, number> {
+    const byId = new Map<number, { id: number; parent_comment_id: number | null }>();
+    for (const comment of comments) {
+      byId.set(comment.id, comment);
+    }
+
+    const depthCache = new Map<number, number>();
+    const visit = (commentId: number, seen: Set<number>): number => {
+      if (depthCache.has(commentId)) return depthCache.get(commentId)!;
+      const comment = byId.get(commentId);
+      if (!comment) return 1;
+      if (comment.parent_comment_id === null) {
+        depthCache.set(commentId, 1);
+        return 1;
+      }
+      if (seen.has(commentId)) {
+        depthCache.set(commentId, 1);
+        return 1;
+      }
+
+      const nextSeen = new Set(seen);
+      nextSeen.add(commentId);
+      const parentDepth = visit(comment.parent_comment_id, nextSeen);
+      const depth = Math.min(parentDepth + 1, 32);
+      depthCache.set(commentId, depth);
+      return depth;
+    };
+
+    for (const comment of comments) {
+      visit(comment.id, new Set());
+    }
+
+    return depthCache;
+  }
+
+  private pickReplyTargetByDepth(
+    comments: Array<{ id: number; author: string; parent_comment_id: number | null }>,
+    account: Address,
+  ): number | null {
+    if (comments.length === 0) return null;
+
+    const depths = this.computeCommentDepths(comments);
+    const candidates = comments.filter((comment) => comment.author.toLowerCase() !== account.toLowerCase());
+    if (candidates.length === 0) return null;
+
+    const maxDepth = 6;
+    const targetDepthWeights = Array.from({ length: maxDepth }, (_, idx) => {
+      const depth = idx + 1;
+      const base = 0.6 ** (depth - 1);
+      return depth >= maxDepth ? base * 0.35 : base;
+    });
+    const targetDepthIndex = this.weightedRandomIndex(targetDepthWeights);
+    const targetDepth = targetDepthIndex === null ? 1 : targetDepthIndex + 1;
+
+    const boundedCandidates = candidates.filter((comment) => (depths.get(comment.id) ?? 1) <= maxDepth);
+    if (boundedCandidates.length === 0) {
+      return null;
+    }
+
+    const targetBand = boundedCandidates.filter((comment) => {
+      const depth = depths.get(comment.id) ?? 1;
+      return depth === targetDepth;
+    });
+
+    const pool = targetBand.length > 0 ? targetBand : boundedCandidates;
+    const weights = pool.map((comment) => {
+      const depth = depths.get(comment.id) ?? 1;
+      const depthDistancePenalty = 0.7 ** Math.abs(depth - targetDepth);
+      return depthDistancePenalty;
+    });
+
+    const picked = this.weightedRandomIndex(weights);
+    if (picked === null) return pool[pool.length - 1]?.id ?? null;
+    return pool[picked]?.id ?? null;
+  }
+
+  private async requestStructuredResponse<T>(
+    schema: z.ZodType<T>,
+    systemPrompt: string,
+    userPayload: unknown,
+    label: string,
+  ): Promise<T | null> {
+    let reminder: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: env.OPENAI_MODEL,
+          temperature: env.OPENAI_TEMPERATURE,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: systemPrompt },
+            {
+              role: 'user',
+              content: JSON.stringify({
+                ...((typeof userPayload === 'object' && userPayload !== null ? userPayload : { input: userPayload }) as object),
+                formatReminder: reminder,
+              }),
+            },
+          ],
+        });
+
+        const raw = completion.choices[0]?.message?.content ?? '{}';
+        const parsed = parseJsonObject(raw);
+        const validated = schema.safeParse(parsed);
+        if (validated.success) {
+          return validated.data;
+        }
+
+        const firstIssue = validated.error.issues[0];
+        reminder = `Return valid JSON only. Fix field "${firstIssue?.path?.join('.') ?? 'unknown'}": ${
+          firstIssue?.message ?? 'invalid'
+        }.`;
+      } catch (error) {
+        reminder = `Retry due to request error: ${errorMessage(error)}`;
+      }
+    }
+
+    console.warn(`[agent:${this.name}] ${label} generation failed after retries`);
+    return null;
+  }
+
+  private async generatePostDraft(
+    account: Address,
+    context: AgentContext,
+    rationale: string | undefined,
+  ): Promise<{ title: string; body: string } | null> {
+    return await this.requestStructuredResponse(
+      z.object({
+        title: z.string().trim().min(1).max(180),
+        body: z.string().trim().min(1).max(4000),
+      }),
+      [
+        `You are ${this.name}, a DAO agent representing a human holder.`,
+        `Write one discussion post with concrete governance negotiation points.`,
+        `No templates and no boilerplate. Reference current DAO share distribution and recent thread dynamics.`,
+        `Output JSON: {"title":"...","body":"..."}.`,
+      ].join('\n'),
+      {
+        now: new Date().toISOString(),
+        agent: { address: account, holderProfile: this.holderProfile, share: context.selfShare },
+        daoShares: context.daoShares.slice(0, 10),
+        pendingActionIds: context.pendingActionIds,
+        topFeed: context.feed.slice(0, 8).map((item) => ({
+          id: item.id,
+          title: item.post_title,
+          author: item.author,
+          commentCount: item.comment_count,
+          bodyPreview: item.body?.slice(0, 280) ?? null,
+        })),
+        rationale,
+      },
+      'discussion-post',
+    );
+  }
+
+  private async generateCommentDraft(
+    account: Address,
+    context: AgentContext,
+    targetPostId: number,
+    replyToCommentId: number | null,
+    rationale: string | undefined,
+  ): Promise<{ body: string; replyToCommentId?: number | null } | null> {
+    const details = context.postDetails[targetPostId] ?? null;
+    return await this.requestStructuredResponse(
+      z.object({
+        body: z.string().trim().min(1).max(3000),
+        replyToCommentId: z.number().int().positive().nullable().optional(),
+      }),
+      [
+        `You are ${this.name}, a DAO delegate arguing in a live governance thread for your holder.`,
+        `Reply directly to the latest arguments and be willing to disagree.`,
+        `If the debate is active, continue the thread deeply instead of starting a new one.`,
+        `Prefer directly addressing another participant's claim, with evidence or tradeoff framing.`,
+        `Output JSON: {"body":"...","replyToCommentId": number|null}.`,
+      ].join('\n'),
+      {
+        now: new Date().toISOString(),
+        targetPostId,
+        holderProfile: this.holderProfile,
+        selfShare: context.selfShare,
+        daoShares: context.daoShares.slice(0, 10),
+        post: context.feed.find((item) => item.id === targetPostId) ?? null,
+        comments:
+          details?.comments.map((comment) => ({
+            id: comment.id,
+            author: comment.author,
+            parentCommentId: comment.parent_comment_id,
+            body: comment.body,
+          })) ?? [],
+        replyToCommentId,
+        rationale,
+      },
+      'comment-draft',
+    );
+  }
+
+  private async generateActionPostDraft(
+    account: Address,
+    context: AgentContext,
+    actionId: bigint,
+    amountIn: bigint,
+    rationale: string | undefined,
+  ): Promise<{ title: string; body: string } | null> {
+    return await this.requestStructuredResponse(
+      z.object({
+        title: z.string().trim().min(1).max(180),
+        body: z.string().trim().min(1).max(4000),
+      }),
+      [
+        `You are ${this.name}, posting an action proposal thread as a DAO delegate.`,
+        `The post must explain why this action is in your holder's interest and how DAO share coalitions affect its viability.`,
+        `No canned language, no generic filler, and no markdown fences.`,
+        `Output JSON: {"title":"...","body":"..."}.`,
+      ].join('\n'),
+      {
+        now: new Date().toISOString(),
+        actionId: actionId.toString(),
+        amountInToken: formatTokenAmount(amountIn),
+        treasuryTokenSymbol: env.DAO_TOKEN_SYMBOL,
+        agent: { address: account, holderProfile: this.holderProfile, share: context.selfShare },
+        daoShares: context.daoShares.slice(0, 10),
+        rationale,
+      },
+      'action-post',
+    );
   }
 
   private extractCommentId(receipt: any): number | null {
@@ -415,26 +761,36 @@ class AgentRunner {
     author: Address,
     txHash: `0x${string}`,
   ): Promise<void> {
-    try {
-      const response = await fetch(`${env.WEB_API_BASE_URL}/comments/body`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          commentId,
-          parentPostId,
-          parentCommentId,
-          contentHash,
-          body,
-          author,
-          txHash,
-        }),
-      });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const response = await fetch(`${env.WEB_API_BASE_URL}/comments/body`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            commentId,
+            parentPostId,
+            parentCommentId,
+            contentHash,
+            body,
+            author,
+            txHash,
+          }),
+        });
 
-      if (!response.ok) {
-        console.warn(`[agent:${this.name}] comment cache failed: ${await response.text()}`);
+        if (response.ok) return;
+        const details = await response.text();
+        if (attempt === 4) {
+          console.warn(`[agent:${this.name}] comment cache failed: ${details}`);
+          return;
+        }
+      } catch (error) {
+        if (attempt === 4) {
+          console.warn(`[agent:${this.name}] comment cache request failed: ${(error as Error).message}`);
+          return;
+        }
       }
-    } catch (error) {
-      console.warn(`[agent:${this.name}] comment cache request failed: ${(error as Error).message}`);
+
+      await sleep(600 * (attempt + 1));
     }
   }
 
@@ -566,6 +922,45 @@ class AgentRunner {
     return checked.filter((value): value is number => typeof value === 'number');
   }
 
+  private async filterLiveForumPosts(
+    publicClient: any,
+    feed: FeedItem[],
+    postDetails: Record<number, PostDetailsResponse>,
+  ): Promise<FeedItem[]> {
+    try {
+      const nextPostId = (await publicClient.readContract({
+        address: env.FORUM_ADDRESS as Address,
+        abi: forumAbi,
+        functionName: 'nextPostId',
+        args: [],
+      })) as bigint;
+
+      const maxLivePostId = Number(nextPostId) - 1;
+      if (!Number.isFinite(maxLivePostId) || maxLivePostId < 0) {
+        return [];
+      }
+
+      const liveFeed = feed.filter((item) => item.id > 0 && item.id <= maxLivePostId);
+      if (liveFeed.length !== feed.length) {
+        console.log(
+          `[agent:${this.name}] filtered stale posts from feed ${feed.length} -> ${liveFeed.length} (maxLivePostId=${maxLivePostId})`,
+        );
+      }
+
+      for (const postIdKey of Object.keys(postDetails)) {
+        const postId = Number(postIdKey);
+        if (postId > maxLivePostId) {
+          delete postDetails[postId];
+        }
+      }
+
+      return liveFeed;
+    } catch (error) {
+      console.warn(`[agent:${this.name}] failed to verify live posts: ${errorMessage(error)}`);
+      return feed;
+    }
+  }
+
   private async decideNextAction(account: Address, context: AgentContext): Promise<AgentDecision> {
     const feedSummary = context.feed.slice(0, 15).map((item) => ({
       id: item.id,
@@ -604,8 +999,8 @@ class AgentRunner {
     const daoShareSummary = context.daoShares.slice(0, 12).map((member) => ({
       address: member.address,
       handle: member.handle,
-      bondedSharePct: member.bondedSharePct,
-      bondedBalance: member.bondedBalance,
+      sharePct: daoSharePct(member),
+      stakeBalance: daoStakeBalance(member),
       availableBalance: member.availableBalance,
       totalVotedStake: member.totalVotedStake,
     }));
@@ -616,6 +1011,8 @@ class AgentRunner {
       createdAt: memory.created_at,
     }));
 
+    const conversationTargets = this.buildConversationTargets(context, account).slice(0, 10);
+    const recentCommentedPostIds = this.getRecentCommentedPostIds(context, 8);
     const promptPayload = {
       now: new Date().toISOString(),
       agent: {
@@ -628,6 +1025,8 @@ class AgentRunner {
       daoShares: daoShareSummary,
       feed: feedSummary,
       postDetails: postDetailSummary,
+      conversationTargets,
+      recentCommentedPostIds,
       memories: memorySummary,
       constraints: {
         maxOneOnchainActionPerTick: true,
@@ -640,74 +1039,29 @@ class AgentRunner {
       `Primary objective: represent that holder's interests in governance debates and execution decisions.`,
       `Use DAO share distribution to guide negotiation strategy: identify who can block/pass decisions and build coalitions explicitly.`,
       `You may choose exactly one on-chain action this tick: idle, post, comment, propose_action, or vote.`,
+      `If there are pending actions you have not voted on, prioritize vote over comment/post.`,
+      `If there are no pending actions, periodically choose propose_action to put forward a concrete executable option.`,
+      `When commenting, prefer recent and relevant threads, not just the same thread repeatedly.`,
+      `You may go deep in a thread using replyToCommentId; depth should usually be 1-3 and only rarely 6+.`,
+      `Do not abandon posting: create new discussion posts when there is a genuinely new angle to raise.`,
       `Prefer substantive negotiation over spam. Use specific references to current posts/actions/votes when possible.`,
       `Return only strict JSON with fields: plan, rationale, memory, and optional post/comment/action/vote objects.`,
       `Do not include markdown fences.`,
     ].join('\n');
 
-    try {
-      const completion = await openai.chat.completions.create({
-        model: env.OPENAI_MODEL,
-        temperature: env.OPENAI_TEMPERATURE,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: JSON.stringify(promptPayload) },
-        ],
-      });
-
-      const raw = completion.choices[0]?.message?.content ?? '{}';
-      const parsed = parseJsonObject(raw);
-      const decision = agentDecisionSchema.safeParse(parsed);
-      if (decision.success) {
-        return decision.data;
-      }
-
-      const firstIssue = decision.error.issues[0];
-      console.warn(
-        `[agent:${this.name}] ai decision parse failed (${firstIssue?.path?.join('.') ?? 'unknown'}: ${firstIssue?.message ?? 'invalid'}), using fallback`,
-      );
-      return this.fallbackDecision(context);
-    } catch (error) {
-      console.warn(`[agent:${this.name}] ai decision request failed: ${errorMessage(error)}`);
-      return this.fallbackDecision(context);
-    }
-  }
-
-  private fallbackDecision(context: AgentContext): AgentDecision {
-    if (context.pendingActionIds.length > 0) {
-      return {
-        plan: 'vote',
-        rationale: 'Fallback: support pending action for liveness.',
-        vote: {
-          actionId: context.pendingActionIds[0],
-          support: true,
-          stakeAmount: '70000000',
-        },
-      };
-    }
-
-    if (context.feed.length > 0) {
-      if (this.tickCount % 2 === 0) {
-        return {
-          plan: 'comment',
-          rationale: 'Fallback: keep negotiations active by commenting.',
-          comment: {
-            postId: context.feed[0]?.id,
-            body: this.buildFallbackCommentBody(context.feed[0]?.post_title ?? null),
-          },
-        };
-      }
-
-      return {
-        plan: 'post',
-        rationale: 'Fallback: add a fresh governance discussion thread.',
-      };
+    const decision = await this.requestStructuredResponse<AgentDecision>(
+      agentDecisionSchema as z.ZodType<AgentDecision>,
+      systemPrompt,
+      promptPayload,
+      'decision',
+    );
+    if (decision) {
+      return decision;
     }
 
     return {
-      plan: 'post',
-      rationale: 'Fallback: bootstrap first thread when feed is empty.',
+      plan: 'idle',
+      rationale: 'No valid model output for this tick.',
     };
   }
 
@@ -851,7 +1205,18 @@ class AgentRunner {
       return `discussion skipped: available stake ${availableStake.toString()} below postBondMin ${postBondMin.toString()}`;
     }
 
-    const draft = decision.post ?? this.buildFallbackDiscussionDraft(context);
+    const directDraft =
+      decision.post?.title && decision.post.body
+        ? {
+            title: decision.post.title,
+            body: decision.post.body,
+          }
+        : null;
+    const draft = directDraft ?? (await this.generatePostDraft(account.address, context, decision.rationale));
+    if (!draft) {
+      return 'discussion skipped: model did not provide post draft';
+    }
+
     const contentHash = keccak256(toHex(this.composePostContent(draft.title, draft.body)));
 
     const txHash = await this.writeContractWithRetry(
@@ -879,51 +1244,100 @@ class AgentRunner {
     decision: AgentDecision,
     context: AgentContext,
   ): Promise<string> {
-    const decisionPostId = decision.comment?.postId;
-    const fallbackPost =
-      context.feed.find((item) => item.author.toLowerCase() !== account.address.toLowerCase()) ?? context.feed[0] ?? null;
-
-    const targetPostId = decisionPostId ?? fallbackPost?.id;
-    if (!targetPostId) {
+    const decisionPostId =
+      typeof decision.comment?.postId === 'number' && context.feed.some((item) => item.id === decision.comment?.postId)
+        ? decision.comment?.postId
+        : null;
+    const stickyExclusions = this.getStickyThreadExclusions(context);
+    const allowedDecisionPostId = decisionPostId !== null && !stickyExclusions.has(decisionPostId) ? decisionPostId : null;
+    const diversifiedTarget =
+      this.pickRandomRelevantThread(context, account.address, stickyExclusions) ?? this.pickRandomRelevantThread(context, account.address);
+    const primaryTargetPostId = allowedDecisionPostId ?? diversifiedTarget ?? decisionPostId ?? context.feed[0]?.id;
+    if (!primaryTargetPostId) {
       return 'comment skipped: no post targets available';
     }
-
-    const targetPost = context.feed.find((item) => item.id === targetPostId) ?? null;
-    const details = context.postDetails[targetPostId] ?? (await this.fetchPostDetails(targetPostId));
-    const commentPool = details?.comments ?? [];
-
-    let parentCommentId: number | null = null;
-    if (decision.comment?.replyToCommentId) {
-      const exists = commentPool.some((comment) => comment.id === decision.comment?.replyToCommentId);
-      parentCommentId = exists ? decision.comment.replyToCommentId ?? null : null;
-    } else if (commentPool.length > 0 && this.tickCount % 2 === 0) {
-      parentCommentId = commentPool[0]?.id ?? null;
+    if (decisionPostId !== null && allowedDecisionPostId === null) {
+      console.log(
+        `[agent:${this.name}] bypassing repeated model thread post=${decisionPostId}; selected post=${primaryTargetPostId} for diversification`,
+      );
     }
 
-    const body = decision.comment?.body?.trim() || this.buildFallbackCommentBody(targetPost?.post_title ?? null);
-    const contentHash = keccak256(toHex(body));
+    const candidatePostIds = [...new Set([primaryTargetPostId, ...context.feed.map((item) => item.id)])];
+    let reusableBody = decision.comment?.body?.trim() ?? '';
+    let staleCount = 0;
 
-    const txHash = await this.writeContractWithRetry(
-      publicClient,
-      walletClient,
-      account,
-      {
-        address: env.FORUM_ADDRESS as Address,
-        abi: forumAbi,
-        functionName: 'comment',
-        args: [BigInt(targetPostId), contentHash],
-      },
-      'comment',
-    );
+    for (const targetPostId of candidatePostIds) {
+      const details = context.postDetails[targetPostId] ?? (await this.fetchPostDetails(targetPostId));
+      if (details) {
+        context.postDetails[targetPostId] = details;
+      }
 
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-    const commentId = this.extractCommentId(receipt);
-    if (commentId === null) {
-      return `comment submitted on post ${targetPostId} (comment id decode failed)`;
+      const commentPool = details?.comments ?? [];
+      let parentCommentId: number | null = null;
+      if (decision.comment?.replyToCommentId) {
+        const exists = commentPool.some((comment) => comment.id === decision.comment?.replyToCommentId);
+        parentCommentId = exists ? decision.comment.replyToCommentId ?? null : null;
+      } else {
+        parentCommentId = this.pickReplyTargetByDepth(commentPool, account.address);
+      }
+
+      let body = reusableBody;
+      if (!body) {
+        const generated = await this.generateCommentDraft(account.address, context, targetPostId, parentCommentId, decision.rationale);
+        if (generated?.replyToCommentId !== undefined && generated.replyToCommentId !== null) {
+          const exists = commentPool.some((comment) => comment.id === generated.replyToCommentId);
+          if (exists) {
+            parentCommentId = generated.replyToCommentId;
+          }
+        }
+        body = generated?.body?.trim() ?? '';
+        reusableBody = body;
+      }
+
+      if (!body) {
+        return 'comment skipped: model did not provide comment body';
+      }
+
+      const contentHash = keccak256(toHex(body));
+
+      try {
+        const txHash = await this.writeContractWithRetry(
+          publicClient,
+          walletClient,
+          account,
+          {
+            address: env.FORUM_ADDRESS as Address,
+            abi: forumAbi,
+            functionName: 'comment',
+            args: [BigInt(targetPostId), contentHash],
+          },
+          'comment',
+        );
+
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        const commentId = this.extractCommentId(receipt);
+        if (commentId === null) {
+          return `comment submitted on post ${targetPostId} (comment id decode failed)`;
+        }
+
+        await this.persistCommentBody(commentId, targetPostId, parentCommentId, contentHash, body, account.address, txHash);
+        return `comment created post=${targetPostId} comment=${commentId}${parentCommentId ? ` replyTo=${parentCommentId}` : ''}`;
+      } catch (error) {
+        if (!isPostNotFoundError(error)) {
+          throw error;
+        }
+
+        staleCount += 1;
+        delete context.postDetails[targetPostId];
+        console.warn(`[agent:${this.name}] skipping stale post ${targetPostId}: PostNotFound`);
+      }
     }
 
-    await this.persistCommentBody(commentId, targetPostId, parentCommentId, contentHash, body, account.address, txHash);
-    return `comment created post=${targetPostId} comment=${commentId}`;
+    if (staleCount > 0) {
+      return `comment skipped: no live posts available (${staleCount} stale targets)`;
+    }
+
+    return 'comment skipped: no post targets available';
   }
 
   private async maybeCreateAction(
@@ -931,6 +1345,7 @@ class AgentRunner {
     walletClient: any,
     account: AgentAccount,
     decision: AgentDecision,
+    context: AgentContext,
   ): Promise<string> {
     const [availableStake, actionBondMin] = await Promise.all([
       publicClient.readContract({
@@ -952,7 +1367,7 @@ class AgentRunner {
     }
 
     const actionConfig = decision.action;
-    const amountIn = toSafeBigInt(actionConfig?.amountInUSDC, 50_000_000n);
+    const amountIn = toSafeBigInt(actionConfig?.amountInToken ?? actionConfig?.amountInUSDC, 50_000_000n);
     const minAmountOut = 1n;
     const slippageBps = clampInt(actionConfig?.slippageBps, 100, 1, 2000);
     const deadlineSeconds = clampInt(actionConfig?.deadlineSeconds, 60 * 60, 300, 24 * 60 * 60);
@@ -964,7 +1379,7 @@ class AgentRunner {
       body: JSON.stringify({
         proposer: account.address,
         tokenOut,
-        amountInUSDC: amountIn.toString(),
+        amountInToken: amountIn.toString(),
         slippageBps,
         deadlineSeconds,
       }),
@@ -1002,7 +1417,16 @@ class AgentRunner {
     const actionId = simulation.result as bigint;
     const actionRef = encodeAbiParameters([{ type: 'uint256' }], [actionId]);
 
-    const actionPost = this.buildActionPostDraft(actionId, actionConfig?.rationale ?? decision.rationale ?? '', amountIn);
+    const actionPost = await this.generateActionPostDraft(
+      account.address,
+      context,
+      actionId,
+      amountIn,
+      actionConfig?.rationale ?? decision.rationale,
+    );
+    if (!actionPost) {
+      return `action created id=${actionId.toString()} but discussion post skipped: model did not provide draft`;
+    }
     const actionPostHash = keccak256(toHex(this.composePostContent(actionPost.title, actionPost.body)));
 
     const postTx = await this.writeContractWithRetry(
@@ -1100,7 +1524,7 @@ class AgentRunner {
       case 'comment':
         return await this.maybeCreateComment(publicClient, walletClient, account, decision, context);
       case 'propose_action':
-        return await this.maybeCreateAction(publicClient, walletClient, account, decision);
+        return await this.maybeCreateAction(publicClient, walletClient, account, decision, context);
       case 'vote':
         return await this.maybeVoteAction(publicClient, walletClient, account, decision, context);
       default:
@@ -1110,6 +1534,7 @@ class AgentRunner {
 
   private async runAIGovernanceTick(publicClient: any, walletClient: any, account: AgentAccount): Promise<void> {
     const context = await this.buildContext(account.address);
+    context.feed = await this.filterLiveForumPosts(publicClient, context.feed, context.postDetails);
     const livePendingActionIds = await this.filterLivePendingActions(publicClient, context.pendingActionIds);
     if (livePendingActionIds.length !== context.pendingActionIds.length) {
       console.log(
@@ -1120,7 +1545,7 @@ class AgentRunner {
 
     const topHolders = context.daoShares
       .slice(0, 3)
-      .map((member) => `${member.handle ?? member.address.slice(0, 10)}:${member.bondedSharePct}%`)
+      .map((member) => `${member.handle ?? member.address.slice(0, 10)}:${daoSharePct(member).toFixed(2)}%`)
       .join(', ');
 
     await this.persistMemory(account.address, {
@@ -1131,11 +1556,91 @@ class AgentRunner {
       metadata: {
         tick: this.tickCount,
         pendingActionIds: context.pendingActionIds,
-        selfSharePct: context.selfShare?.bondedSharePct ?? 0,
+        selfSharePct: daoSharePct(context.selfShare),
       },
     });
 
-    const decision = await this.decideNextAction(account.address, context);
+    let decision = await this.decideNextAction(account.address, context);
+    const activeThreads = this.buildConversationTargets(context, account.address).filter((target) => target.commentCount > 0);
+    if (decision.plan === 'idle' && activeThreads.length > 0 && Math.random() < 0.65) {
+      const stickyExclusions = this.getStickyThreadExclusions(context);
+      const threadPostId =
+        this.pickRandomRelevantThread(context, account.address, stickyExclusions) ??
+        this.pickRandomRelevantThread(context, account.address) ??
+        activeThreads[0]?.postId ??
+        null;
+      if (threadPostId !== null) {
+        const threadComments = context.postDetails[threadPostId]?.comments ?? [];
+        const replyToCommentId = this.pickReplyTargetByDepth(threadComments, account.address);
+        decision = {
+          ...decision,
+          plan: 'comment',
+          comment: {
+            postId: threadPostId,
+            replyToCommentId,
+            body: decision.comment?.body ?? '',
+          },
+          rationale:
+            decision.rationale ??
+            'Thread is active; engaging in discussion instead of idling this tick.',
+        } as AgentDecision;
+      }
+    }
+
+    if (context.pendingActionIds.length > 0 && decision.plan !== 'vote') {
+      const fallbackActionId =
+        (decision.vote?.actionId && context.pendingActionIds.includes(decision.vote.actionId)
+          ? decision.vote.actionId
+          : context.pendingActionIds[0]) ?? null;
+
+      if (fallbackActionId !== null) {
+        decision = {
+          ...decision,
+          plan: 'vote',
+          vote: {
+            ...decision.vote,
+            actionId: fallbackActionId,
+          },
+          rationale:
+            decision.rationale ??
+            'Pending actions are available; casting a vote now to move governance forward.',
+        } as AgentDecision;
+        console.log(`[agent:${this.name}] promoting plan to vote (pending actions available)`);
+      }
+    }
+
+    const recentOutcomes = context.memories.filter((memory) => memory.memory_type === 'outcome').slice(0, 6);
+    const hasRecentPost = recentOutcomes.some(
+      (memory) => memory.reference_type === 'post' || memory.memory_text.toLowerCase().includes('discussion created'),
+    );
+    if (!hasRecentPost && (decision.plan === 'idle' || decision.plan === 'comment') && Math.random() < 0.4) {
+      decision = {
+        ...decision,
+        plan: 'post',
+        post: {
+          title: decision.post?.title,
+          body: decision.post?.body,
+        },
+        rationale:
+          decision.rationale ??
+          'Creating a fresh thread to broaden the agenda after repeated comment-only ticks.',
+      } as AgentDecision;
+    }
+
+    const hasRecentActionAttempt = recentOutcomes.some((memory) => memory.reference_type === 'propose_action');
+    const canPromoteToAction = decision.plan === 'idle' || decision.plan === 'comment' || decision.plan === 'post';
+    if (context.pendingActionIds.length === 0 && canPromoteToAction && !hasRecentActionAttempt) {
+      decision = {
+        ...decision,
+        plan: 'propose_action',
+        action: decision.action,
+        rationale:
+          decision.rationale ??
+          'No pending actions and no recent action attempts; proposing an action to keep governance moving.',
+      } as AgentDecision;
+      console.log(`[agent:${this.name}] promoting plan to propose_action (no pending actions, no recent attempts)`);
+    }
+
     await this.persistMemory(account.address, {
       memoryType: 'decision',
       referenceType: decision.plan,
@@ -1287,15 +1792,28 @@ async function assertContractsDeployed(network: RuntimeNetwork): Promise<void> {
 }
 
 function buildPrivateKeys(): `0x${string}`[] {
-  if (env.AGENT_PRIVATE_KEYS) {
+  if (env.AGENT_PRIVATE_KEYS?.trim()) {
     return env.AGENT_PRIVATE_KEYS.split(',').map((key) => key.trim() as `0x${string}`);
+  }
+
+  const agentsPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../agents.txt');
+  try {
+    const content = readFileSync(agentsPath, 'utf-8');
+    const keys = content
+      .split('\n')
+      .map((k) => k.trim())
+      .filter(Boolean)
+      .map((k) => (k.startsWith('0x') ? k : `0x${k}`) as `0x${string}`);
+    if (keys.length > 0) return keys;
+  } catch {
+    /* ignore */
   }
 
   if (env.PRIVATE_KEY) {
     return [env.PRIVATE_KEY as `0x${string}`];
   }
 
-  throw new Error('AGENT_PRIVATE_KEYS or PRIVATE_KEY must be set for agent runtime');
+  throw new Error('AGENT_PRIVATE_KEYS or agents.txt or PRIVATE_KEY must be set for agent runtime');
 }
 
 function buildHolderProfile(index: number): string {
