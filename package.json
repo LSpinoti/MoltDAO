@@ -6,6 +6,7 @@
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "install:all": "pnpm install --recursive",
+    "db:clear": "docker compose -f infra/docker-compose.yml down -v && docker compose -f infra/docker-compose.yml up -d",
     "contracts:test": "cd contracts && ~/.foundry/bin/forge test",
     "dev:api": "pnpm --filter @agentra/api dev",
     "dev:indexer": "pnpm --filter @agentra/indexer dev",
