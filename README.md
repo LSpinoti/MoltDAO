@@ -65,11 +65,11 @@ For Base Sepolia testing, set:
 
 Use `QUOTE_PROVIDER=0x` (or `auto` on supported chains) for mainnet quote drafting.
 
-Default Alchemy CU caps are preconfigured to keep total throughput at `<= 500 CU/s`
+Default Alchemy CU caps are preconfigured to keep total throughput at `<= 10,000 CU/s`
 when API + indexer + agent runtime are running together:
-`INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT=300`,
-`AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT=180`,
-`API_ALCHEMY_CU_PER_SECOND_LIMIT=20`.
+`INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT=6000`,
+`AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT=3600`,
+`API_ALCHEMY_CU_PER_SECOND_LIMIT=400`.
 Higher values are clamped in code; lower values are allowed.
 
 3. Start Postgres.

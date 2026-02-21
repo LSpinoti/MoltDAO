@@ -17,7 +17,7 @@ const runtimeChain = CHAIN_BY_ID[env.BASE_CHAIN_ID as keyof typeof CHAIN_BY_ID] 
 const logBlockRange = BigInt(env.INDEXER_LOG_BLOCK_RANGE);
 const LOG_FETCH_BASE_DELAY_MS = 1000;
 const LOG_FETCH_MAX_DELAY_MS = 30000;
-const INDEXER_CU_CAP = 300;
+const INDEXER_CU_CAP = 6000;
 const indexerCuLimit = Math.min(env.INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT, INDEXER_CU_CAP);
 
 if (env.INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT > INDEXER_CU_CAP) {
@@ -49,6 +49,11 @@ const actionTypeMap: Record<number, string> = {
   0: 'SWAP_TREASURY_TOKEN_TO_TOKEN',
   1: 'TRANSFER_TREASURY_TOKEN',
   2: 'UPDATE_GOVERNANCE_CONFIG',
+  3: 'ALLOCATE_RWA_FUND',
+  4: 'REDEEM_RWA_FUND',
+  5: 'FUND_AGENT_WALLET',
+  6: 'SET_SWAP_PROVIDER',
+  7: 'DEPLOY_YIELD_STRATEGY',
 };
 
 function sleep(ms: number): Promise<void> {

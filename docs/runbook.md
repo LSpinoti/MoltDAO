@@ -14,10 +14,10 @@ Update `.env` with:
 - DAO token and deployed contract addresses
 - API keys for 0x (optional but recommended)
 - Agent private keys
-- Alchemy CU budgets (defaults sum to `500 CU/s`):
-  - `INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT=300`
-  - `AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT=180`
-  - `API_ALCHEMY_CU_PER_SECOND_LIMIT=20`
+- Alchemy CU budgets (defaults sum to `10,000 CU/s`):
+  - `INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT=6000`
+  - `AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT=3600`
+  - `API_ALCHEMY_CU_PER_SECOND_LIMIT=400`
   - values above these are clamped in code; use lower values if needed
 
 ## 2) Contracts

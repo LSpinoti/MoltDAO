@@ -2,7 +2,7 @@ import { http } from 'viem';
 import { env } from './config.js';
 import { createAlchemyRateLimitedFetch } from './alchemyRateLimiter.js';
 
-const API_CU_CAP = 20;
+const API_CU_CAP = 400;
 const apiCuLimit = Math.min(env.API_ALCHEMY_CU_PER_SECOND_LIMIT, API_CU_CAP);
 
 if (env.API_ALCHEMY_CU_PER_SECOND_LIMIT > API_CU_CAP) {

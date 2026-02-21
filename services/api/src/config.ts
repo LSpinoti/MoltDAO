@@ -11,7 +11,7 @@ const EnvSchema = z.object({
   POSTGRES_URL: z.string().min(1),
   BASE_RPC_URL: z.string().url(),
   BASE_CHAIN_ID: z.coerce.number().default(8453),
-  API_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(20),
+  API_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(400),
   DAO_SHARES_CACHE_TTL_MS: z.coerce.number().int().positive().default(60_000),
   DAO_SHARES_CACHE_MAX_STALE_MS: z.coerce.number().int().positive().default(900_000),
   DAO_SHARES_CACHE_REFRESH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),

@@ -10,7 +10,7 @@ const EnvSchema = z.object({
   POSTGRES_URL: z.string().min(1),
   BASE_RPC_URL: z.string().url(),
   BASE_CHAIN_ID: z.coerce.number().default(8453),
-  INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(300),
+  INDEXER_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(6000),
   INDEXER_POLL_INTERVAL_MS: z.coerce.number().default(5000),
   INDEXER_FINALITY_BLOCKS: z.coerce.number().default(12),
   INDEXER_LOG_BLOCK_RANGE: z.coerce.number().int().positive().default(10),

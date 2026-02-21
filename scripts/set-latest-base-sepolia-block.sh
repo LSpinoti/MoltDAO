@@ -20,17 +20,34 @@ if [[ -z "${RPC_URL}" ]]; then
   exit 1
 fi
 
+CHAIN_ID="${BASE_CHAIN_ID:-84532}"
+if ! [[ "${CHAIN_ID}" =~ ^[0-9]+$ ]]; then
+  echo "BASE_CHAIN_ID must be a number in .env" >&2
+  exit 1
+fi
+
 LATEST_BLOCK="$(
-  node - "${RPC_URL}" <<'NODE'
+  node - "${RPC_URL}" "${CHAIN_ID}" <<'NODE'
 const { JsonRpcProvider } = require('ethers');
 
 const rpcUrl = process.argv[2];
+const chainIdRaw = process.argv[3];
 if (!rpcUrl) {
   throw new Error('missing rpc url');
 }
+const chainId = Number(chainIdRaw || '84532');
+if (!Number.isFinite(chainId)) {
+  throw new Error('invalid chain id');
+}
+
+function networkForChainId(id) {
+  if (id === 84532) return { name: 'base-sepolia', chainId: id };
+  if (id === 8453) return { name: 'base', chainId: id };
+  return { name: `chain-${id}`, chainId: id };
+}
 
 async function main() {
-  const provider = new JsonRpcProvider(rpcUrl);
+  const provider = new JsonRpcProvider(rpcUrl, networkForChainId(chainId), { staticNetwork: true });
   const block = await provider.getBlockNumber();
   process.stdout.write(String(block));
 }

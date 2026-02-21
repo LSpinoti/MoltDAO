@@ -20,9 +20,43 @@ interface IActionExecutor {
         uint256 deadline
     ) external returns (uint256 actionId);
 
+    function createRwaFundAction(
+        uint256 postId,
+        bytes32 fundId,
+        uint256 amount,
+        bool isAllocation,
+        uint256 deadline
+    ) external returns (uint256 actionId);
+
+    function createAgentWalletFundAction(
+        uint256 postId,
+        address agent,
+        uint256 amount,
+        uint256 deadline
+    ) external returns (uint256 actionId);
+
+    function createSwapProviderAction(
+        uint256 postId,
+        address newProvider,
+        bytes32 providerNameHash,
+        uint256 deadline
+    ) external returns (uint256 actionId);
+
+    function createYieldStrategyAction(
+        uint256 postId,
+        bytes32 strategyId,
+        uint256 allocationAmount,
+        uint256 riskTier,
+        uint256 deadline
+    ) external returns (uint256 actionId);
+
     function executeSwap(uint256 actionId, bytes calldata swapCalldata) external;
     function executeTransfer(uint256 actionId, address to, uint256 amount) external;
     function executeGovernanceConfig(uint256 actionId) external;
+    function executeRwaFundAction(uint256 actionId) external;
+    function executeAgentWalletFund(uint256 actionId) external;
+    function executeSwapProviderChange(uint256 actionId) external;
+    function executeYieldStrategy(uint256 actionId) external;
     function attachPost(uint256 actionId, uint256 postId, address expectedProposer) external;
     function recordVote(uint256 actionId, address voter, bool support, uint256 stakeAmount) external;
     function actionExists(uint256 actionId) external view returns (bool);

@@ -138,6 +138,11 @@ const governanceActionTypeSchema = z.enum([
   'SWAP_TREASURY_TOKEN_TO_TOKEN',
   'TRANSFER_TREASURY_TOKEN',
   'UPDATE_GOVERNANCE_CONFIG',
+  'ALLOCATE_RWA_FUND',
+  'REDEEM_RWA_FUND',
+  'FUND_AGENT_WALLET',
+  'SET_SWAP_PROVIDER',
+  'DEPLOY_YIELD_STRATEGY',
   'SOFT_VOTE',
 ]);
 type GovernanceActionType = z.infer<typeof governanceActionTypeSchema>;
@@ -196,6 +201,13 @@ const agentDecisionSchema = z.object({
       uniqueSupportersThreshold: z.number().int().min(1).max(10_000).optional(),
       supportBpsThreshold: z.number().int().min(1).max(10_000).optional(),
       votingWindowSeconds: z.number().int().min(60 * 60).max(7 * 24 * 60 * 60).optional(),
+      rwaFundId: z.string().trim().max(100).optional(),
+      rwaIsAllocation: z.boolean().optional(),
+      agentAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
+      swapProviderAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
+      swapProviderName: z.string().trim().max(60).optional(),
+      yieldStrategyId: z.string().trim().max(100).optional(),
+      riskTier: z.number().int().min(0).max(3).optional(),
       rationale: z.string().trim().max(800).optional(),
     })
     .optional(),
@@ -214,7 +226,7 @@ const CHAIN_BY_ID: Record<number, RuntimeChain> = {
   8453: base,
   84532: baseSepolia,
 };
-const AGENT_RUNTIME_CU_CAP = 180;
+const AGENT_RUNTIME_CU_CAP = 3600;
 const agentRuntimeCuLimit = Math.min(env.AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT, AGENT_RUNTIME_CU_CAP);
 const TX_RETRY_FEE_BUMPS_BPS = [10_000n, 12_500n, 15_000n, 18_000n] as const;
 const TX_RETRY_DELAY_MS = 700;
@@ -379,7 +391,7 @@ function formatTokenAmount(amount: bigint): string {
 
 class AgentRunner {
   private readonly votedActions = new Set<number>();
-  private actionProposalCursor = 0;
+  private actionProposalCursor: number;
   private tickCount = 0;
 
   constructor(
@@ -389,7 +401,10 @@ class AgentRunner {
     private readonly holderProfile: string,
     private readonly chain: RuntimeChain,
     private readonly rpcUrl: string,
-  ) {}
+    agentIndex: number,
+  ) {
+    this.actionProposalCursor = agentIndex;
+  }
 
   async tick(): Promise<void> {
     this.tickCount += 1;
@@ -683,6 +698,8 @@ class AgentRunner {
         `Use sharp claims, explicit tradeoffs, and one non-obvious insight from current thread dynamics.`,
         `Sound human and opinionated. Avoid corporate filler, hedging clichés, and robotic phrasing.`,
         `Reference current DAO share distribution and explain coalition implications.`,
+        `The DAO manages RWA positions on Canton Network (T-bills, real estate, commodities, private credit, stablecoins). Consider whether posts should discuss RWA rebalancing, yield comparisons between DeFi and RWA, or Canton privacy tradeoffs.`,
+        `Treasury swaps route through Uniswap on Base. AI inference uses 0G decentralized compute. Agent payments settle via Kite AI x402 protocol.`,
         `Output JSON: {"title":"...","body":"..."}.`,
       ].join('\n'),
       {
@@ -835,6 +852,27 @@ class AgentRunner {
       .slice(0, limit);
   }
 
+  private getExistingActionTypesFromFeed(context: AgentContext): GovernanceActionType[] {
+    const feedTypes: GovernanceActionType[] = [];
+    for (const item of context.feed) {
+      if (item.action_status === 'CREATED') {
+        const details = context.postDetails[item.id];
+        const actionType = details?.action?.type;
+        if (actionType && isGovernanceActionType(actionType)) {
+          feedTypes.push(actionType);
+        }
+      }
+    }
+    for (const actionId of context.pendingActionIds) {
+      const details = context.pendingActionDetails[actionId];
+      const actionType = details?.action?.type;
+      if (actionType && isGovernanceActionType(actionType)) {
+        feedTypes.push(actionType);
+      }
+    }
+    return feedTypes;
+  }
+
   private pickActionProposalType(decision: AgentDecision, context: AgentContext): GovernanceActionType {
     const requested = decision.action?.actionType;
     if (requested) return requested;
@@ -845,16 +883,24 @@ class AgentRunner {
 
     const rotation: GovernanceActionType[] = [
       'TRANSFER_TREASURY_TOKEN',
-      'UPDATE_GOVERNANCE_CONFIG',
+      'ALLOCATE_RWA_FUND',
       'SWAP_TREASURY_TOKEN_TO_TOKEN',
+      'DEPLOY_YIELD_STRATEGY',
+      'UPDATE_GOVERNANCE_CONFIG',
+      'REDEEM_RWA_FUND',
+      'FUND_AGENT_WALLET',
+      'SET_SWAP_PROVIDER',
       'SOFT_VOTE',
     ];
-    const recent = this.getRecentProposedActionTypes(context, rotation.length);
+
+    const recentFromMemory = this.getRecentProposedActionTypes(context, rotation.length);
+    const existingInFeed = this.getExistingActionTypesFromFeed(context);
+    const allRecent = [...new Set([...recentFromMemory, ...existingInFeed])];
 
     for (let offset = 0; offset < rotation.length; offset += 1) {
       const index = (this.actionProposalCursor + offset) % rotation.length;
       const candidate = rotation[index] ?? 'SWAP_TREASURY_TOKEN_TO_TOKEN';
-      if (!recent.includes(candidate)) {
+      if (!allRecent.includes(candidate)) {
         this.actionProposalCursor = (index + 1) % rotation.length;
         return candidate;
       }
@@ -1207,6 +1253,19 @@ class AgentRunner {
 
     const conversationTargets = this.buildConversationTargets(context, account).slice(0, 10);
     const recentCommentedPostIds = this.getRecentCommentedPostIds(context, 8);
+
+    const existingActionTypesInFeed = [
+      ...new Set(
+        context.feed
+          .filter((item) => item.action_id !== null)
+          .map((item) => {
+            const details = context.postDetails[item.id];
+            return details?.action?.type ?? null;
+          })
+          .filter((t): t is string => t !== null),
+      ),
+    ];
+
     const promptPayload = {
       now: new Date().toISOString(),
       agent: {
@@ -1214,6 +1273,7 @@ class AgentRunner {
         address: account,
         holderProfile: this.holderProfile,
         share: context.selfShare,
+        tickCount: this.tickCount,
       },
       pendingActionIds: context.pendingActionIds,
       daoShares: daoShareSummary,
@@ -1222,6 +1282,7 @@ class AgentRunner {
       pendingActions: pendingActionSummary,
       conversationTargets,
       recentCommentedPostIds,
+      existingActionTypesInFeed,
       memories: memorySummary,
       constraints: {
         maxOneOnchainActionPerTick: true,
@@ -1236,8 +1297,14 @@ class AgentRunner {
       `Use DAO share distribution to guide negotiation strategy: identify who can block/pass decisions and build coalitions explicitly.`,
       `You may choose exactly one on-chain action this tick: idle, post, comment, propose_action, or vote.`,
       `When pending actions exist, prioritize substantive discussion (post/comment or propose_action with action.actionType=SOFT_VOTE) before hard voting.`,
-      `If there are no pending actions, periodically choose propose_action to put forward a concrete executable option.`,
+      `If there are no pending actions AND the feed has no recent action proposals, you may choose propose_action to put forward a concrete executable option.`,
+      `CRITICAL: Check existingActionTypesInFeed before proposing. NEVER propose an action type that already exists in the feed. Pick a DIFFERENT action type. If all types are covered, prefer commenting on or voting on existing proposals instead.`,
+      `If this is your first or second tick (tickCount <= 2), prioritize reading existing posts and commenting on them. Do not propose actions until you have engaged with what is already on the forum.`,
       `If plan=propose_action, set action.actionType to one of ${GOVERNANCE_ACTION_TYPES.join(', ')}.`,
+      `ALLOCATE_RWA_FUND sends treasury tokens into a Canton Network RWA fund. REDEEM_RWA_FUND pulls tokens back. Set action.rwaFundId to one of: canton-tbill-001, canton-realestate-002, canton-commodity-003, canton-credit-004, canton-stablecoin-005.`,
+      `FUND_AGENT_WALLET sends tokens to an agent's x402 payment wallet on Kite AI. Set action.agentAddress.`,
+      `SET_SWAP_PROVIDER votes to change the DEX used for treasury swaps (e.g. Uniswap V3, 0x Protocol). Set action.swapProviderName.`,
+      `DEPLOY_YIELD_STRATEGY deploys an AI-managed yield strategy via 0G Compute. Set action.yieldStrategyId and action.riskTier (0=conservative, 1=balanced, 2=growth, 3=aggressive).`,
       `SOFT_VOTE is non-binding and discussion-only; it does not execute treasury changes.`,
       `When commenting, prefer recent and relevant threads, not just the same thread repeatedly.`,
       `You may go deep in a thread using replyToCommentId; depth should usually be 1-3 and only rarely 6+.`,
@@ -1245,6 +1312,13 @@ class AgentRunner {
       `Prefer substantive negotiation over spam. Use specific references to current posts/actions/votes when possible.`,
       `Style constraints: sound human, pointed, and insight-seeking; avoid robotic/corporate phrasing, generic platitudes, and empty diplomacy.`,
       `In every non-idle plan, try to add at least one concrete insight: a hidden assumption, second-order effect, or coalition implication.`,
+      // Canton RWA context
+      `The DAO treasury includes RWA positions managed via Canton Network: US Treasury Bills (45% allocation, ~4.8% yield), Tokenized Real Estate (22%, ~6.2%), Commodity Index (16%, ~3.4%), Private Credit (12%, ~8.7%), and Stablecoin Reserve (5%, ~5.2%). Canton provides sub-transaction privacy so only authorized parties see fund details.`,
+      `When discussing treasury strategy, consider the RWA allocation mix and whether the DAO should rebalance between crypto-native DeFi yields and real-world asset yields. Reference specific Canton fund positions when relevant.`,
+      // Swap routing context
+      `Treasury swap actions (SWAP_TREASURY_TOKEN_TO_TOKEN) are routed through the Uniswap API for optimal execution on Base. Consider Uniswap liquidity depth and slippage when proposing or discussing swap sizes.`,
+      // 0G Compute context
+      `Your AI inference runs on 0G Compute (decentralized compute network). Each decision you make is attested on-chain for verifiability. Factor compute costs into governance efficiency discussions.`,
       `Return only strict JSON with fields: plan, rationale, memory, and optional post/comment/action/vote objects.`,
       `Do not include markdown fences.`,
     ].join('\n');
@@ -1782,6 +1856,211 @@ class AgentRunner {
     );
   }
 
+  private async maybeCreateRwaFundAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+    isAllocation: boolean,
+  ): Promise<string> {
+    const actionConfig = decision.action;
+    const amountIn = toSafeBigInt(actionConfig?.amountInToken ?? actionConfig?.amountInUSDC, 100_000_000n);
+    const deadlineSeconds = clampInt(actionConfig?.deadlineSeconds, 2 * 60 * 60, 300, 24 * 60 * 60);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+
+    const RWA_FUND_IDS = [
+      'canton-tbill-001',
+      'canton-realestate-002',
+      'canton-commodity-003',
+      'canton-credit-004',
+      'canton-stablecoin-005',
+    ];
+    const fundIdString = actionConfig?.rwaFundId ?? RWA_FUND_IDS[Math.floor(Math.random() * RWA_FUND_IDS.length)] ?? RWA_FUND_IDS[0];
+    const fundIdHash = keccak256(toHex(fundIdString));
+
+    const simulation = await publicClient.simulateContract({
+      account,
+      address: env.ACTION_EXECUTOR_ADDRESS as Address,
+      abi: actionExecutorAbi,
+      functionName: 'createRwaFundAction',
+      args: [0n, fundIdHash, amountIn, isAllocation, deadline],
+    });
+
+    const actionTx = await this.writeContractWithRetry(
+      publicClient,
+      walletClient,
+      account,
+      { ...simulation.request },
+      isAllocation ? 'createAllocateRwaFund' : 'createRedeemRwaFund',
+    );
+
+    await publicClient.waitForTransactionReceipt({ hash: actionTx });
+    const actionId = simulation.result as bigint;
+
+    const actionType: GovernanceActionType = isAllocation ? 'ALLOCATE_RWA_FUND' : 'REDEEM_RWA_FUND';
+    return await this.createActionDiscussionPost(
+      publicClient, walletClient, account, context, actionId, actionType,
+      {
+        fundId: fundIdString,
+        amountToken: formatTokenAmount(amountIn),
+        isAllocation,
+        deadlineSeconds,
+        platform: 'Canton Network',
+      },
+      actionConfig?.rationale ?? decision.rationale,
+    );
+  }
+
+  private async maybeCreateAgentWalletFundAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+  ): Promise<string> {
+    const actionConfig = decision.action;
+    const amountIn = toSafeBigInt(actionConfig?.amountInToken ?? actionConfig?.amountInUSDC, 20_000_000n);
+    const deadlineSeconds = clampInt(actionConfig?.deadlineSeconds, 2 * 60 * 60, 300, 24 * 60 * 60);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+
+    const targetAgent = isAddress(actionConfig?.agentAddress)
+      ? actionConfig.agentAddress
+      : (context.daoShares[Math.floor(Math.random() * Math.min(context.daoShares.length, 5))]?.address ?? account.address) as `0x${string}`;
+
+    const simulation = await publicClient.simulateContract({
+      account,
+      address: env.ACTION_EXECUTOR_ADDRESS as Address,
+      abi: actionExecutorAbi,
+      functionName: 'createAgentWalletFundAction',
+      args: [0n, targetAgent as Address, amountIn, deadline],
+    });
+
+    const actionTx = await this.writeContractWithRetry(
+      publicClient, walletClient, account,
+      { ...simulation.request },
+      'createAgentWalletFund',
+    );
+
+    await publicClient.waitForTransactionReceipt({ hash: actionTx });
+    const actionId = simulation.result as bigint;
+
+    return await this.createActionDiscussionPost(
+      publicClient, walletClient, account, context, actionId, 'FUND_AGENT_WALLET',
+      {
+        targetAgent,
+        amountToken: formatTokenAmount(amountIn),
+        deadlineSeconds,
+        platform: 'Kite AI x402',
+      },
+      actionConfig?.rationale ?? decision.rationale,
+    );
+  }
+
+  private async maybeCreateSwapProviderAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+  ): Promise<string> {
+    const actionConfig = decision.action;
+    const deadlineSeconds = clampInt(actionConfig?.deadlineSeconds, 2 * 60 * 60, 300, 24 * 60 * 60);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+
+    const PROVIDERS = [
+      { name: 'Uniswap V3', address: '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45' },
+      { name: '0x Protocol', address: '0xDef1C0ded9bec7F1a1670819833240f027b25EfF' },
+    ];
+    const providerName = actionConfig?.swapProviderName ?? PROVIDERS[Math.floor(Math.random() * PROVIDERS.length)]!.name;
+    const providerAddress = isAddress(actionConfig?.swapProviderAddress)
+      ? actionConfig.swapProviderAddress
+      : (PROVIDERS.find(p => p.name === providerName)?.address ?? PROVIDERS[0]!.address) as `0x${string}`;
+    const nameHash = keccak256(toHex(providerName));
+
+    const simulation = await publicClient.simulateContract({
+      account,
+      address: env.ACTION_EXECUTOR_ADDRESS as Address,
+      abi: actionExecutorAbi,
+      functionName: 'createSwapProviderAction',
+      args: [0n, providerAddress as Address, nameHash, deadline],
+    });
+
+    const actionTx = await this.writeContractWithRetry(
+      publicClient, walletClient, account,
+      { ...simulation.request },
+      'createSwapProviderAction',
+    );
+
+    await publicClient.waitForTransactionReceipt({ hash: actionTx });
+    const actionId = simulation.result as bigint;
+
+    return await this.createActionDiscussionPost(
+      publicClient, walletClient, account, context, actionId, 'SET_SWAP_PROVIDER',
+      {
+        providerName,
+        providerAddress,
+        deadlineSeconds,
+      },
+      actionConfig?.rationale ?? decision.rationale,
+    );
+  }
+
+  private async maybeCreateYieldStrategyAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+  ): Promise<string> {
+    const actionConfig = decision.action;
+    const allocationAmount = toSafeBigInt(actionConfig?.amountInToken ?? actionConfig?.amountInUSDC, 75_000_000n);
+    const deadlineSeconds = clampInt(actionConfig?.deadlineSeconds, 2 * 60 * 60, 300, 24 * 60 * 60);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+    const riskTier = BigInt(clampInt(actionConfig?.riskTier, 1, 0, 3));
+
+    const STRATEGIES = [
+      'conservative-stablecoin-lp',
+      'balanced-eth-yield',
+      'growth-multi-asset',
+      'aggressive-concentrated-lp',
+    ];
+    const strategyName = actionConfig?.yieldStrategyId ?? STRATEGIES[Number(riskTier)] ?? STRATEGIES[1]!;
+    const strategyIdHash = keccak256(toHex(strategyName));
+
+    const simulation = await publicClient.simulateContract({
+      account,
+      address: env.ACTION_EXECUTOR_ADDRESS as Address,
+      abi: actionExecutorAbi,
+      functionName: 'createYieldStrategyAction',
+      args: [0n, strategyIdHash, allocationAmount, riskTier, deadline],
+    });
+
+    const actionTx = await this.writeContractWithRetry(
+      publicClient, walletClient, account,
+      { ...simulation.request },
+      'createYieldStrategy',
+    );
+
+    await publicClient.waitForTransactionReceipt({ hash: actionTx });
+    const actionId = simulation.result as bigint;
+
+    const RISK_LABELS = ['Conservative', 'Balanced', 'Growth', 'Aggressive'];
+
+    return await this.createActionDiscussionPost(
+      publicClient, walletClient, account, context, actionId, 'DEPLOY_YIELD_STRATEGY',
+      {
+        strategyName,
+        allocationAmountToken: formatTokenAmount(allocationAmount),
+        riskTier: Number(riskTier),
+        riskLabel: RISK_LABELS[Number(riskTier)] ?? 'Unknown',
+        deadlineSeconds,
+        platform: '0G Compute AI-managed',
+      },
+      actionConfig?.rationale ?? decision.rationale,
+    );
+  }
+
   private async maybeCreateSoftVoteAction(
     publicClient: any,
     walletClient: any,
@@ -1888,6 +2167,16 @@ class AgentRunner {
         return await this.maybeCreateTransferAction(publicClient, walletClient, account, decision, context);
       case 'UPDATE_GOVERNANCE_CONFIG':
         return await this.maybeCreateGovernanceConfigAction(publicClient, walletClient, account, decision, context);
+      case 'ALLOCATE_RWA_FUND':
+        return await this.maybeCreateRwaFundAction(publicClient, walletClient, account, decision, context, true);
+      case 'REDEEM_RWA_FUND':
+        return await this.maybeCreateRwaFundAction(publicClient, walletClient, account, decision, context, false);
+      case 'FUND_AGENT_WALLET':
+        return await this.maybeCreateAgentWalletFundAction(publicClient, walletClient, account, decision, context);
+      case 'SET_SWAP_PROVIDER':
+        return await this.maybeCreateSwapProviderAction(publicClient, walletClient, account, decision, context);
+      case 'DEPLOY_YIELD_STRATEGY':
+        return await this.maybeCreateYieldStrategyAction(publicClient, walletClient, account, decision, context);
       default:
         return await this.maybeCreateSoftVoteAction(publicClient, walletClient, account, decision, context);
     }
@@ -2122,7 +2411,10 @@ class AgentRunner {
 
     const hasRecentActionAttempt = recentOutcomes.some((memory) => memory.reference_type === 'propose_action');
     const canPromoteToAction = decision.plan === 'idle' || decision.plan === 'comment' || decision.plan === 'post';
-    if (context.pendingActionIds.length === 0 && canPromoteToAction && !hasRecentActionAttempt) {
+    const feedHasPendingActions = context.feed.some((item) => item.action_status === 'CREATED');
+    const isFreshAgent = this.tickCount <= 2;
+
+    if (context.pendingActionIds.length === 0 && !feedHasPendingActions && canPromoteToAction && !hasRecentActionAttempt && !isFreshAgent) {
       decision = {
         ...decision,
         plan: 'propose_action',
@@ -2132,6 +2424,32 @@ class AgentRunner {
           'No pending actions and no recent action attempts; proposing an action to keep governance moving.',
       } as AgentDecision;
       console.log(`[agent:${this.name}] promoting plan to propose_action (no pending actions, no recent attempts)`);
+    }
+
+    if (isFreshAgent && context.feed.length > 0 && (decision.plan === 'propose_action' || decision.plan === 'vote')) {
+      const stickyExclusions = this.getStickyThreadExclusions(context);
+      const threadPostId =
+        this.pickRandomRelevantThread(context, account.address, stickyExclusions) ??
+        this.pickRandomRelevantThread(context, account.address) ??
+        null;
+      if (threadPostId !== null) {
+        const threadComments = context.postDetails[threadPostId]?.comments ?? [];
+        const replyToCommentId = this.pickReplyTargetByDepth(threadComments, account.address);
+        decision = {
+          ...decision,
+          plan: 'comment',
+          comment: { postId: threadPostId, replyToCommentId, body: '' },
+          rationale: 'New agent: reading existing posts and engaging in discussion before proposing new actions.',
+        } as AgentDecision;
+        console.log(`[agent:${this.name}] fresh agent demoting to comment (tick ${this.tickCount})`);
+      } else if (decision.plan === 'propose_action') {
+        decision = {
+          ...decision,
+          plan: 'post',
+          rationale: 'New agent: creating a discussion post to engage with the forum before proposing actions.',
+        } as AgentDecision;
+        console.log(`[agent:${this.name}] fresh agent demoting to post (tick ${this.tickCount})`);
+      }
     }
 
     await this.persistMemory(account.address, {
@@ -2346,6 +2664,7 @@ async function main() {
         buildHolderProfile(index),
         network.chain,
         network.rpcUrl,
+        index,
       ),
   );
 

@@ -10,7 +10,7 @@ const EnvSchema = z.object({
   BASE_RPC_URL: z.string().url(),
   BASE_SEPOLIA_RPC_URL: z.string().url().optional(),
   BASE_CHAIN_ID: z.coerce.number().default(8453),
-  AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(180),
+  AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(3600),
   WEB_API_BASE_URL: z.string().url().default('http://localhost:3001'),
   OPENAI_API_KEY: z.string().min(1),
   OPENAI_MODEL: z.string().default('gpt-4.1-mini'),

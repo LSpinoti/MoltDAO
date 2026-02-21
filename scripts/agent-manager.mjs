@@ -6,6 +6,7 @@
  * Usage:
  *   node scripts/agent-manager.mjs fund <amount_token>             # Send each agent X DAO tokens from PRIVATE_KEY wallet
  *   node scripts/agent-manager.mjs fund-varied [start] [step]      # Send varying DAO token amounts per agent
+ *   node scripts/agent-manager.mjs fund-random [min] [max]         # Send each agent a random DAO token amount
  *   node scripts/agent-manager.mjs balances                        # Print DAO token balance for each agent
  *   node scripts/agent-manager.mjs fund-eth <amount>               # Send each agent X Base Sepolia ETH
  *   node scripts/agent-manager.mjs env                             # Print AGENT_PRIVATE_KEYS for .env
@@ -19,6 +20,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { config } from 'dotenv';
 import { ethers } from 'ethers';
+import { randomInt } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
@@ -76,6 +78,16 @@ function getRpcAndToken() {
   if (!rpcUrl) throw new Error('BASE_SEPOLIA_RPC_URL or BASE_RPC_URL required');
   if (!tokenAddress) throw new Error('DAO token address env var required (DAO_TOKEN_ADDRESS* or fallback USDC_ADDRESS*)');
   return { rpcUrl, tokenAddress, chainId };
+}
+
+function networkForChainId(chainId) {
+  if (chainId === 84532) return { name: 'base-sepolia', chainId };
+  if (chainId === 8453) return { name: 'base', chainId };
+  return { name: `chain-${chainId}`, chainId };
+}
+
+function createProvider(rpcUrl, chainId) {
+  return new ethers.JsonRpcProvider(rpcUrl, networkForChainId(chainId), { staticNetwork: true });
 }
 
 function getEnvConfig() {
@@ -139,9 +151,9 @@ function cmdSync() {
 
 async function cmdBalances() {
   const addresses = loadAgentAddresses();
-  const { rpcUrl, tokenAddress } = getRpcAndToken();
+  const { rpcUrl, tokenAddress, chainId } = getRpcAndToken();
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = createProvider(rpcUrl, chainId);
   const token = new ethers.Contract(tokenAddress, ERC20_ABI, provider);
   const { decimals, symbol } = await getTokenMetadata(token);
 
@@ -157,10 +169,10 @@ async function cmdBalances() {
 }
 
 async function cmdFundUniform(amountToken) {
-  const { rpcUrl, tokenAddress, privateKey } = getEnvConfig();
+  const { rpcUrl, tokenAddress, privateKey, chainId } = getEnvConfig();
   const addresses = loadAgentAddresses();
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = createProvider(rpcUrl, chainId);
   const signer = new ethers.Wallet(privateKey, provider);
   const token = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
   const { decimals, symbol } = await getTokenMetadata(token);
@@ -186,10 +198,10 @@ async function cmdFundUniform(amountToken) {
 }
 
 async function cmdFundVaried(startAmountInput, stepAmountInput) {
-  const { rpcUrl, tokenAddress, privateKey } = getEnvConfig();
+  const { rpcUrl, tokenAddress, privateKey, chainId } = getEnvConfig();
   const addresses = loadAgentAddresses();
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = createProvider(rpcUrl, chainId);
   const signer = new ethers.Wallet(privateKey, provider);
   const token = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
   const { decimals, symbol } = await getTokenMetadata(token);
@@ -231,12 +243,70 @@ async function cmdFundVaried(startAmountInput, stepAmountInput) {
   console.log(`Funded ${addresses.length} agents with varied ${symbol} amounts starting at ${startAmount}, step ${stepAmount}.`);
 }
 
+async function cmdFundRandom(minAmountInput, maxAmountInput) {
+  const { rpcUrl, tokenAddress, privateKey, chainId } = getEnvConfig();
+  const addresses = loadAgentAddresses();
+
+  const provider = createProvider(rpcUrl, chainId);
+  const signer = new ethers.Wallet(privateKey, provider);
+  const token = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
+  const { decimals, symbol } = await getTokenMetadata(token);
+
+  const minAmount = Number(minAmountInput ?? process.env.AGENTS_FUND_MIN ?? 50);
+  const maxAmount = Number(maxAmountInput ?? process.env.AGENTS_FUND_MAX ?? 200);
+  if (!Number.isFinite(minAmount) || minAmount <= 0) {
+    throw new Error('fund-random min amount must be a positive number');
+  }
+  if (!Number.isFinite(maxAmount) || maxAmount <= 0) {
+    throw new Error('fund-random max amount must be a positive number');
+  }
+  if (maxAmount < minAmount) {
+    throw new Error('fund-random max amount must be >= min amount');
+  }
+
+  const minInt = Math.floor(minAmount);
+  const maxInt = Math.floor(maxAmount);
+  if (minInt <= 0) {
+    throw new Error('fund-random min amount must be >= 1');
+  }
+  if (maxInt < minInt) {
+    throw new Error('fund-random max amount must be >= min amount (after rounding)');
+  }
+
+  const transfers = addresses.map((address) => {
+    const amountInt = randomInt(minInt, maxInt + 1);
+    const amountStr = String(amountInt);
+    return {
+      address,
+      amountStr,
+      amountWei: ethers.parseUnits(amountStr, decimals),
+    };
+  });
+
+  const totalNeeded = transfers.reduce((acc, item) => acc + item.amountWei, 0n);
+  const signerBalance = await token.balanceOf(signer.address);
+  if (signerBalance < totalNeeded) {
+    throw new Error(
+      `Insufficient ${symbol}: wallet has ${ethers.formatUnits(signerBalance, decimals)}, ` +
+        `need ${ethers.formatUnits(totalNeeded, decimals)} for ${addresses.length} agents`,
+    );
+  }
+
+  for (const transfer of transfers) {
+    const tx = await token.transfer(transfer.address, transfer.amountWei);
+    console.log(`Sent ${transfer.amountStr} ${symbol} to ${transfer.address} tx=${tx.hash}`);
+    await tx.wait();
+  }
+
+  console.log(`Funded ${addresses.length} agents with random ${symbol} amounts between ${minInt} and ${maxInt}.`);
+}
+
 async function cmdFundEth(amountEth) {
   const amount = ethers.parseEther(String(amountEth));
   const keys = loadAgentKeys();
-  const { rpcUrl, privateKey } = getEnvConfig();
+  const { rpcUrl, privateKey, chainId } = getEnvConfig();
 
-  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const provider = createProvider(rpcUrl, chainId);
   const signer = new ethers.Wallet(privateKey, provider);
 
   const addresses = keys.map((k) => {
@@ -279,6 +349,7 @@ Agent Manager
 
   node scripts/agent-manager.mjs fund <amount_token>            Send each agent X DAO tokens
   node scripts/agent-manager.mjs fund-varied [start] [step]     Send varying DAO token amounts per agent
+  node scripts/agent-manager.mjs fund-random [min] [max]        Send each agent a random DAO token amount
   node scripts/agent-manager.mjs balances                        Print DAO token balance for each agent
   node scripts/agent-manager.mjs fund-eth <amount>              Send each agent X Base Sepolia ETH
   node scripts/agent-manager.mjs env                             Print AGENT_PRIVATE_KEYS for .env
@@ -318,6 +389,11 @@ Uses BASE_SEPOLIA_RPC_URL/BASE_RPC_URL, DAO_TOKEN_ADDRESS* (fallback USDC_ADDRES
 
   if (op === 'fund-varied') {
     await cmdFundVaried(arg1, arg2);
+    return;
+  }
+
+  if (op === 'fund-random') {
+    await cmdFundRandom(arg1, arg2);
     return;
   }
 

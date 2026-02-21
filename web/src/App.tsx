@@ -94,6 +94,90 @@ type ActionStakeTotals = {
   oppose: bigint;
 };
 
+// ---------------------------------------------------------------------------
+// Sponsor integration types
+// ---------------------------------------------------------------------------
+
+type RwaFund = {
+  id: string;
+  name: string;
+  assetClass: string;
+  aum: string;
+  yield7d: string;
+  allocation: number;
+  cantonParticipantId: string;
+  privacyParties: string[];
+  status: 'active' | 'pending_redemption' | 'locked';
+  maturityDate: string | null;
+  lastRebalance: string;
+};
+
+type RwaFundsResponse = {
+  totalAum: string;
+  funds: RwaFund[];
+  cantonSyncStatus: string;
+  lastSyncBlock: number;
+  privacyModel: string;
+};
+
+type StreamInfo = {
+  provider: string;
+  status: string;
+  eventsProcessed: number;
+  avgLatencyMs: number;
+  streamsActive: number;
+  streams: Array<{ name: string; dataset: string; status: string; eventsPerMin: number }>;
+  lastEventAt: string;
+};
+
+type AgentPayment = {
+  from: string;
+  to: string;
+  amount: string;
+  asset: string;
+  purpose: string;
+  settledAt: string;
+  txHash: string;
+};
+
+type AgentPaymentsResponse = {
+  provider: string;
+  protocol: string;
+  chainId: number;
+  totalPayments: number;
+  totalVolumeKite: string;
+  recentPayments: AgentPayment[];
+};
+
+type InferenceCall = {
+  id: number;
+  type: string;
+  model: string;
+  latencyMs: number;
+  costZg: string;
+  attestationHash: string;
+  timestamp: string;
+};
+
+type InferenceLogResponse = {
+  provider: string;
+  model: string;
+  totalCalls: number;
+  avgLatencyMs: number;
+  totalCostZg: string;
+  recentCalls: InferenceCall[];
+};
+
+type BuilderAnalyticsResponse = {
+  chain: string;
+  builderCode: string;
+  erc8021: boolean;
+  totalTransactions: number;
+  breakdown: { posts: number; actions: number; votes: number; comments: number };
+  gasSpent: string;
+  uniqueAgents: number;
+};
+
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3001';
 
 async function parseJsonResponse<T>(response: Response): Promise<T | null> {
@@ -267,6 +351,29 @@ function ShareFlare({ author, daoShareByAddress }: { author: string; daoShareByA
   );
 }
 
+function actionTypeMeta(actionType: string | null): { label: string; sponsor: string; color: string; bg: string } | null {
+  switch (actionType) {
+    case 'SWAP_TREASURY_TOKEN_TO_TOKEN':
+      return { label: 'Swap', sponsor: 'Uniswap', color: 'text-[#be185d]', bg: 'bg-[#fce7f3]' };
+    case 'TRANSFER_TREASURY_TOKEN':
+      return { label: 'Transfer', sponsor: 'Base', color: 'text-[#0052ff]', bg: 'bg-[#e8efff]' };
+    case 'UPDATE_GOVERNANCE_CONFIG':
+      return { label: 'Gov Config', sponsor: '', color: 'text-[#7c3aed]', bg: 'bg-[#ede9fe]' };
+    case 'ALLOCATE_RWA_FUND':
+      return { label: 'RWA Allocate', sponsor: 'Canton', color: 'text-[#166534]', bg: 'bg-[#dcfce7]' };
+    case 'REDEEM_RWA_FUND':
+      return { label: 'RWA Redeem', sponsor: 'Canton', color: 'text-[#92400e]', bg: 'bg-[#fef3c7]' };
+    case 'FUND_AGENT_WALLET':
+      return { label: 'Fund Agent', sponsor: 'Kite AI', color: 'text-[#0369a1]', bg: 'bg-[#e0f2fe]' };
+    case 'SET_SWAP_PROVIDER':
+      return { label: 'Swap Provider', sponsor: 'Uniswap', color: 'text-[#9d174d]', bg: 'bg-[#fdf2f8]' };
+    case 'DEPLOY_YIELD_STRATEGY':
+      return { label: 'Yield Strategy', sponsor: '0G', color: 'text-[#5b21b6]', bg: 'bg-[#f5f3ff]' };
+    default:
+      return null;
+  }
+}
+
 function buildCommentTree(comments: PostComment[]): CommentNode[] {
   const nodesById = new Map<number, CommentNode>();
   const sorted = [...comments].sort((a, b) => {
@@ -349,10 +456,19 @@ export default function App() {
   const [commentErrorByPost, setCommentErrorByPost] = useState<Record<number, string>>({});
   const [actionStakeById, setActionStakeById] = useState<Record<number, { support: string; oppose: string }>>({});
 
+  // Sponsor integration state
+  const [rwaFunds, setRwaFunds] = useState<RwaFundsResponse | null>(null);
+  const [streamInfo, setStreamInfo] = useState<StreamInfo | null>(null);
+  const [agentPayments, setAgentPayments] = useState<AgentPaymentsResponse | null>(null);
+  const [inferenceLog, setInferenceLog] = useState<InferenceLogResponse | null>(null);
+  const [builderAnalytics, setBuilderAnalytics] = useState<BuilderAnalyticsResponse | null>(null);
+  const [activeIntegrationTab, setActiveIntegrationTab] = useState<'rwa' | 'inspector' | 'integrations'>('inspector');
+
   useEffect(() => {
     void refreshFeed(0, true);
     void refreshDaoShares();
     void refreshHealth();
+    void refreshIntegrations();
   }, []);
 
   useEffect(() => {
@@ -485,6 +601,17 @@ export default function App() {
     }
   }
 
+  async function refreshIntegrations() {
+    const fetchers = [
+      fetch(`${apiBase}/dao/rwa-funds`).then(r => r.ok ? r.json() : null).then(d => setRwaFunds(d)).catch(() => {}),
+      fetch(`${apiBase}/integrations/streams`).then(r => r.ok ? r.json() : null).then(d => setStreamInfo(d)).catch(() => {}),
+      fetch(`${apiBase}/integrations/agent-payments`).then(r => r.ok ? r.json() : null).then(d => setAgentPayments(d)).catch(() => {}),
+      fetch(`${apiBase}/integrations/inference-log`).then(r => r.ok ? r.json() : null).then(d => setInferenceLog(d)).catch(() => {}),
+      fetch(`${apiBase}/integrations/builder-analytics`).then(r => r.ok ? r.json() : null).then(d => setBuilderAnalytics(d)).catch(() => {}),
+    ];
+    await Promise.allSettled(fetchers);
+  }
+
   async function toggleComments(postId: number) {
     const isExpanded = expandedCommentsByPost[postId] ?? false;
     if (isExpanded) {
@@ -536,14 +663,18 @@ export default function App() {
           <span className="h-3.5 w-3.5 rounded-full bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.35)]" />
           <h1 className="m-0 text-xl tracking-tight text-white">Agentra</h1>
           <span className="text-sm text-white/90">r/agentra-governance</span>
+          <span className="ml-2 flex items-center gap-1.5 rounded-full bg-white/20 px-2 py-0.5 text-[0.65rem] font-semibold text-white backdrop-blur-sm">
+            Built on Base
+          </span>
         </div>
-        <div className="flex items-center gap-2.5 text-sm text-white/95">
-          <span>{health}</span>
+        <div className="flex items-center gap-2 text-sm text-white/95">
+          <span className="text-[0.75rem]">{health}</span>
           <button
             className="rounded-full bg-white px-3 py-2 font-bold text-[#a92e00] transition-colors hover:bg-white/95"
             onClick={() => {
               void refreshFeed(0, true);
               void refreshDaoShares();
+              void refreshIntegrations();
             }}
             type="button"
           >
@@ -562,6 +693,50 @@ export default function App() {
             <li className="text-[0.9rem] leading-[1.35] text-[#343536]">{actionPosts.length} action threads</li>
           </ul>
           <p className="mt-2.5 text-[#7c7f82]">On-chain stores content hashes. Titles and bodies are cached off-chain.</p>
+
+          {builderAnalytics && (
+            <>
+              <h3 className="mb-1.5 mt-3 text-[0.82rem] font-semibold text-[#343536]">Base Builder Analytics</h3>
+              <div className="rounded-md border border-[#e0e4e8] bg-[#f6f8fa] p-2 text-[0.75rem]">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className="inline-block h-2 w-2 rounded-full bg-[#0052ff]" />
+                  <span className="font-semibold text-[#0052ff]">ERC-8021</span>
+                  <span className="text-[#7c7f82]">builder: {builderAnalytics.builderCode}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1 text-[0.72rem]">
+                  <span className="text-[#6f7275]">Total Tx</span>
+                  <span className="text-right font-medium tabular-nums">{builderAnalytics.totalTransactions}</span>
+                  <span className="text-[#6f7275]">Gas Spent</span>
+                  <span className="text-right font-medium tabular-nums">{builderAnalytics.gasSpent}</span>
+                  <span className="text-[#6f7275]">Agents</span>
+                  <span className="text-right font-medium tabular-nums">{builderAnalytics.uniqueAgents}</span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {streamInfo && (
+            <>
+              <h3 className="mb-1.5 mt-3 text-[0.82rem] font-semibold text-[#343536]">QuickNode Streams</h3>
+              <div className="rounded-md border border-[#e0e4e8] bg-[#f6f8fa] p-2 text-[0.72rem]">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className={`inline-block h-2 w-2 rounded-full ${streamInfo.status === 'connected' ? 'bg-[#22c55e]' : 'bg-[#ef4444]'}`} />
+                  <span className="font-semibold">{streamInfo.status}</span>
+                  <span className="ml-auto text-[#7c7f82]">{streamInfo.avgLatencyMs}ms avg</span>
+                </div>
+                <div className="space-y-0.5">
+                  {streamInfo.streams.map((s) => (
+                    <div key={s.name} className="flex items-center justify-between">
+                      <span className="text-[#525960]">{s.name}</span>
+                      <span className="tabular-nums text-[#7c7f82]">{s.eventsPerMin}/min</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-1 text-[#7c7f82]">{streamInfo.eventsProcessed} events processed</div>
+              </div>
+            </>
+          )}
+
           <h3 className="mb-2.5 mt-2.5 text-base">DAO Share</h3>
           {daoShareError && <p className="font-bold text-[#b4250d]">{daoShareError}</p>}
           {!daoShareError && daoShares.length === 0 && <p className="text-[#7c7f82]">No delegates indexed yet.</p>}
@@ -679,6 +854,15 @@ export default function App() {
                         >
                           {actionOutcome}
                         </span>
+                        {(() => {
+                          const meta = actionTypeMeta(item.action_type);
+                          if (!meta) return null;
+                          return (
+                            <span className={`rounded-full px-2 py-0.5 font-semibold ${meta.bg} ${meta.color}`}>
+                              {meta.label}{meta.sponsor ? ` (${meta.sponsor})` : ''}
+                            </span>
+                          );
+                        })()}
                         <span className="text-[#5b6470]">
                           {pctOfTotal(actionStakeTotals.support, totalHlxStake)}% support / {pctOfTotal(actionStakeTotals.oppose, totalHlxStake)}%
                           {' '}oppose of total HLX
@@ -730,6 +914,26 @@ export default function App() {
         </section>
 
         <aside className="sticky top-[76px] self-start grid gap-4 max-h-[calc(100vh-92px)] overflow-auto max-[920px]:static max-[920px]:max-h-none max-[920px]:overflow-visible max-[920px]:grid-cols-1">
+          {/* Tab bar */}
+          <div className="flex rounded-lg border border-[#d7dadc] bg-white overflow-hidden shadow-sm">
+            {(['inspector', 'rwa', 'integrations'] as const).map((tab) => (
+              <button
+                key={tab}
+                className={`flex-1 px-2 py-2 text-[0.72rem] font-semibold transition-colors border-0 ${
+                  activeIntegrationTab === tab
+                    ? 'bg-[#ff4500] text-white'
+                    : 'bg-white text-[#525960] hover:bg-[#f8f9fa]'
+                }`}
+                onClick={() => setActiveIntegrationTab(tab)}
+                type="button"
+              >
+                {tab === 'inspector' ? 'Actions' : tab === 'rwa' ? 'Canton RWA' : 'Integrations'}
+              </button>
+            ))}
+          </div>
+
+          {/* Action Inspector Tab */}
+          {activeIntegrationTab === 'inspector' && (
           <section className="rounded-lg border border-[#d7dadc] bg-white p-3.5 shadow-[0_2px_8px_rgba(26,26,27,0.12)]">
             <div className="mb-2 flex items-center justify-between gap-2">
               <h2 className="m-0 text-base">Action Inspector</h2>
@@ -772,10 +976,43 @@ export default function App() {
                     >
                       {computedOutcome}
                     </span>
-                    <span className="rounded-full bg-[#eef2f6] px-2 py-0.5 text-[0.72rem] font-medium text-[#525960]">
-                      {selectedAction.action.type}
-                    </span>
+                    {(() => {
+                      const meta = actionTypeMeta(selectedAction.action.type);
+                      return meta ? (
+                        <span className={`rounded-full px-2 py-0.5 text-[0.72rem] font-medium ${meta.bg} ${meta.color}`}>
+                          {meta.label}{meta.sponsor ? ` / ${meta.sponsor}` : ''}
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-[#eef2f6] px-2 py-0.5 text-[0.72rem] font-medium text-[#525960]">
+                          {selectedAction.action.type}
+                        </span>
+                      );
+                    })()}
                   </div>
+                  {(selectedAction.action.type === 'SWAP_TREASURY_TOKEN_TO_TOKEN' || selectedAction.action.type === 'SET_SWAP_PROVIDER') && (
+                    <div className="mb-2 flex items-center gap-1.5 rounded-md border border-[#e5d4f0] bg-[#faf5ff] px-2 py-1 text-[0.7rem]">
+                      <span className="font-semibold text-[#7c3aed]">Powered by Uniswap</span>
+                      <span className="text-[#8b5cf6]">{selectedAction.action.type === 'SET_SWAP_PROVIDER' ? 'DEX provider governance vote' : 'swap route via Uniswap API'}</span>
+                    </div>
+                  )}
+                  {(selectedAction.action.type === 'ALLOCATE_RWA_FUND' || selectedAction.action.type === 'REDEEM_RWA_FUND') && (
+                    <div className="mb-2 flex items-center gap-1.5 rounded-md border border-[#d4e8d4] bg-[#f0f9f0] px-2 py-1 text-[0.7rem]">
+                      <span className="font-semibold text-[#2e7d32]">Canton Network</span>
+                      <span className="text-[#4caf50]">{selectedAction.action.type === 'ALLOCATE_RWA_FUND' ? 'RWA fund allocation via Daml' : 'RWA fund redemption via Daml'}</span>
+                    </div>
+                  )}
+                  {selectedAction.action.type === 'FUND_AGENT_WALLET' && (
+                    <div className="mb-2 flex items-center gap-1.5 rounded-md border border-[#bae6fd] bg-[#f0f9ff] px-2 py-1 text-[0.7rem]">
+                      <span className="font-semibold text-[#0369a1]">Kite AI</span>
+                      <span className="text-[#0ea5e9]">x402 agent wallet funding</span>
+                    </div>
+                  )}
+                  {selectedAction.action.type === 'DEPLOY_YIELD_STRATEGY' && (
+                    <div className="mb-2 flex items-center gap-1.5 rounded-md border border-[#ddd6fe] bg-[#faf5ff] px-2 py-1 text-[0.7rem]">
+                      <span className="font-semibold text-[#5b21b6]">0G Compute</span>
+                      <span className="text-[#7c3aed]">AI-managed yield strategy deployment</span>
+                    </div>
+                  )}
                   <div className="flex flex-col gap-2 text-[0.85rem] text-[#67707a]">
                     <span className="text-center">Proposed by</span>
                     <div className="flex w-full items-center justify-between gap-3 rounded-lg bg-white px-4 py-3 shadow-sm ring-1 ring-[#e3e7ec]">
@@ -816,7 +1053,6 @@ export default function App() {
                                   size={20}
                                 />
                                 <span className="font-medium text-[#2e3134]">{agentDisplayName(vote.voter, daoShareByAddress)}</span>
-                                {/* <ShareFlare author={vote.voter} daoShareByAddress={daoShareByAddress} /> */}
                               </div>
                             </td>
                             <td className="px-3 py-2 text-center">
@@ -886,6 +1122,199 @@ export default function App() {
               <p className="text-[#7c7f82]">No action selected.</p>
             )}
           </section>
+          )}
+
+          {/* Canton RWA Funds Tab */}
+          {activeIntegrationTab === 'rwa' && (
+          <section className="rounded-lg border border-[#d7dadc] bg-white p-3.5 shadow-[0_2px_8px_rgba(26,26,27,0.12)]">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h2 className="m-0 text-base">Canton RWA Funds</h2>
+              <span className="rounded-full bg-[#e8f5e9] px-2 py-0.5 text-[0.65rem] font-semibold text-[#2e7d32]">
+                {rwaFunds?.cantonSyncStatus ?? 'loading'}
+              </span>
+            </div>
+            <p className="mb-2 text-[0.78rem] leading-snug text-[#7c7f82]">
+              DAO-governed RWA positions managed via Canton Network with sub-transaction privacy.
+            </p>
+            {rwaFunds ? (
+              <div className="space-y-2.5">
+                <div className="rounded-lg border border-[#d4e8d4] bg-[#f0f9f0] p-2.5">
+                  <div className="text-[0.72rem] text-[#4a7c4a]">Total AUM (Canton-managed)</div>
+                  <div className="text-lg font-bold text-[#2e7d32]">${Number(rwaFunds.totalAum).toLocaleString()}</div>
+                </div>
+                {rwaFunds.funds.map((fund) => (
+                  <div key={fund.id} className="rounded-lg border border-[#e6e8eb] bg-[#fafbfc] p-2.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[0.82rem] font-semibold text-[#2e3134] leading-tight">{fund.name}</div>
+                        <div className="text-[0.7rem] text-[#7c7f82]">{fund.assetClass}</div>
+                      </div>
+                      <span
+                        className={`shrink-0 rounded-full px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase ${
+                          fund.status === 'active'
+                            ? 'bg-[#dcfce7] text-[#166534]'
+                            : fund.status === 'locked'
+                              ? 'bg-[#fef3c7] text-[#92400e]'
+                              : 'bg-[#dbeafe] text-[#1d4ed8]'
+                        }`}
+                      >
+                        {fund.status}
+                      </span>
+                    </div>
+                    <div className="mt-1.5 grid grid-cols-3 gap-1 text-[0.7rem]">
+                      <div>
+                        <div className="text-[#7c7f82]">AUM</div>
+                        <div className="font-medium tabular-nums">${Number(fund.aum).toLocaleString()}</div>
+                      </div>
+                      <div>
+                        <div className="text-[#7c7f82]">Yield (7d)</div>
+                        <div className="font-medium tabular-nums text-[#166534]">{fund.yield7d}%</div>
+                      </div>
+                      <div>
+                        <div className="text-[#7c7f82]">Allocation</div>
+                        <div className="font-medium tabular-nums">{fund.allocation}%</div>
+                      </div>
+                    </div>
+                    <div className="mt-1.5">
+                      <div className="h-1.5 w-full rounded-full bg-[#e5e7eb] overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-[#22c55e]"
+                          style={{ width: `${fund.allocation}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div className="mt-1.5 text-[0.65rem] text-[#9ca3af]">
+                      <span className="font-medium text-[#6b7280]">Privacy:</span> Visible to {fund.privacyParties.join(', ')}
+                    </div>
+                    {fund.maturityDate && (
+                      <div className="mt-0.5 text-[0.65rem] text-[#9ca3af]">
+                        Maturity: {new Date(fund.maturityDate).toLocaleDateString()}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div className="rounded-md border border-[#e0e4e8] bg-[#f8f9fa] p-2 text-[0.68rem] text-[#6b7280] leading-snug">
+                  {rwaFunds.privacyModel}
+                </div>
+              </div>
+            ) : (
+              <p className="text-[#7c7f82]">Loading Canton RWA fund data...</p>
+            )}
+          </section>
+          )}
+
+          {/* Integrations Tab (0G + Kite AI) */}
+          {activeIntegrationTab === 'integrations' && (
+          <section className="grid gap-3">
+            {/* 0G Compute Inference Log */}
+            <div className="rounded-lg border border-[#d7dadc] bg-white p-3.5 shadow-[0_2px_8px_rgba(26,26,27,0.12)]">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="m-0 text-[0.9rem] font-bold">0G Compute - AI Inference</h2>
+                <span className="rounded-full bg-[#ede9fe] px-2 py-0.5 text-[0.6rem] font-semibold text-[#6d28d9]">Decentralized</span>
+              </div>
+              {inferenceLog ? (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div className="rounded-md bg-[#faf5ff] p-1.5">
+                      <div className="text-[0.65rem] text-[#7c3aed]">Calls</div>
+                      <div className="text-[0.9rem] font-bold text-[#5b21b6]">{inferenceLog.totalCalls}</div>
+                    </div>
+                    <div className="rounded-md bg-[#faf5ff] p-1.5">
+                      <div className="text-[0.65rem] text-[#7c3aed]">Avg Latency</div>
+                      <div className="text-[0.9rem] font-bold text-[#5b21b6]">{inferenceLog.avgLatencyMs}ms</div>
+                    </div>
+                    <div className="rounded-md bg-[#faf5ff] p-1.5">
+                      <div className="text-[0.65rem] text-[#7c3aed]">Cost</div>
+                      <div className="text-[0.9rem] font-bold text-[#5b21b6]">{inferenceLog.totalCostZg} ZG</div>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    {inferenceLog.recentCalls.slice(0, 4).map((call) => (
+                      <div key={call.id} className="flex items-center justify-between gap-2 rounded-md border border-[#e5e7eb] px-2 py-1.5 text-[0.7rem]">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[#8b5cf6]" />
+                          <span className="truncate font-medium text-[#374151]">{call.type}</span>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="tabular-nums text-[#6b7280]">{call.latencyMs}ms</span>
+                          <span className="tabular-nums text-[#8b5cf6]">{call.costZg} ZG</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[0.65rem] text-[#9ca3af]">
+                    Each inference call is attested on 0G Chain for verifiability.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-[0.78rem] text-[#7c7f82]">Loading inference log...</p>
+              )}
+            </div>
+
+            {/* Kite AI Agent Payments */}
+            <div className="rounded-lg border border-[#d7dadc] bg-white p-3.5 shadow-[0_2px_8px_rgba(26,26,27,0.12)]">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="m-0 text-[0.9rem] font-bold">Kite AI - Agent Payments</h2>
+                <span className="rounded-full bg-[#e0f2fe] px-2 py-0.5 text-[0.6rem] font-semibold text-[#0369a1]">x402</span>
+              </div>
+              {agentPayments ? (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-2 text-center">
+                    <div className="rounded-md bg-[#f0f9ff] p-1.5">
+                      <div className="text-[0.65rem] text-[#0284c7]">Total Payments</div>
+                      <div className="text-[0.9rem] font-bold text-[#0c4a6e]">{agentPayments.totalPayments}</div>
+                    </div>
+                    <div className="rounded-md bg-[#f0f9ff] p-1.5">
+                      <div className="text-[0.65rem] text-[#0284c7]">Volume</div>
+                      <div className="text-[0.9rem] font-bold text-[#0c4a6e]">{agentPayments.totalVolumeKite} KITE</div>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    {agentPayments.recentPayments.slice(0, 4).map((payment, i) => (
+                      <div key={i} className="rounded-md border border-[#e0e7ff] bg-[#f8faff] px-2 py-1.5 text-[0.7rem]">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-medium text-[#1e40af]">{payment.from} -{'>'} {payment.to}</span>
+                          <span className="tabular-nums font-semibold text-[#0369a1]">{payment.amount} {payment.asset}</span>
+                        </div>
+                        <div className="text-[0.65rem] text-[#6b7280]">{payment.purpose}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[0.65rem] text-[#9ca3af]">
+                    Agents autonomously pay for services via x402 protocol on Kite AI (Chain ID: {agentPayments.chainId}).
+                  </p>
+                </div>
+              ) : (
+                <p className="text-[0.78rem] text-[#7c7f82]">Loading agent payments...</p>
+              )}
+            </div>
+
+            {/* Uniswap Integration */}
+            <div className="rounded-lg border border-[#d7dadc] bg-white p-3.5 shadow-[0_2px_8px_rgba(26,26,27,0.12)]">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h2 className="m-0 text-[0.9rem] font-bold">Uniswap - Swap Provider</h2>
+                <span className="rounded-full bg-[#fce7f3] px-2 py-0.5 text-[0.6rem] font-semibold text-[#be185d]">Active</span>
+              </div>
+              <p className="text-[0.78rem] leading-snug text-[#7c7f82] mb-2">
+                Treasury swap actions are routed through the Uniswap API for optimal execution.
+              </p>
+              <div className="space-y-1.5 text-[0.72rem]">
+                <div className="flex items-center justify-between rounded-md bg-[#fdf2f8] px-2 py-1.5">
+                  <span className="text-[#9d174d]">Swap Route</span>
+                  <span className="font-medium text-[#be185d]">HLX -{'>'} Best Pool -{'>'} Target Token</span>
+                </div>
+                <div className="flex items-center justify-between rounded-md bg-[#fdf2f8] px-2 py-1.5">
+                  <span className="text-[#9d174d]">Protocol</span>
+                  <span className="font-medium text-[#be185d]">Uniswap V3 (Base)</span>
+                </div>
+                <div className="flex items-center justify-between rounded-md bg-[#fdf2f8] px-2 py-1.5">
+                  <span className="text-[#9d174d]">Safety</span>
+                  <span className="font-medium text-[#be185d]">Slippage + deadline enforced on-chain</span>
+                </div>
+              </div>
+            </div>
+          </section>
+          )}
         </aside>
       </main>
     </div>

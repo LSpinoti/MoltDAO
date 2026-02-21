@@ -16,7 +16,12 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
     enum ActionType {
         SWAP_TREASURY_TOKEN_TO_TOKEN,
         TRANSFER_TREASURY_TOKEN,
-        UPDATE_GOVERNANCE_CONFIG
+        UPDATE_GOVERNANCE_CONFIG,
+        ALLOCATE_RWA_FUND,
+        REDEEM_RWA_FUND,
+        FUND_AGENT_WALLET,
+        SET_SWAP_PROVIDER,
+        DEPLOY_YIELD_STRATEGY
     }
 
     enum ActionStatus {
@@ -53,6 +58,31 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         bool exists;
     }
 
+    struct RwaFundPayload {
+        bytes32 fundId;
+        uint256 amount;
+        bool exists;
+    }
+
+    struct AgentWalletPayload {
+        address agent;
+        uint256 amount;
+        bool exists;
+    }
+
+    struct SwapProviderPayload {
+        address newProvider;
+        bytes32 providerNameHash;
+        bool exists;
+    }
+
+    struct YieldStrategyPayload {
+        bytes32 strategyId;
+        uint256 allocationAmount;
+        uint256 riskTier;
+        bool exists;
+    }
+
     IERC20 public immutable treasuryToken;
     IStakeVault public immutable stakeVault;
     IReputation public immutable reputation;
@@ -67,9 +97,14 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
 
     mapping(uint256 => Action) public actions;
     mapping(uint256 => GovernanceConfigPayload) public governanceConfigPayloads;
+    mapping(uint256 => RwaFundPayload) public rwaFundPayloads;
+    mapping(uint256 => AgentWalletPayload) public agentWalletPayloads;
+    mapping(uint256 => SwapProviderPayload) public swapProviderPayloads;
+    mapping(uint256 => YieldStrategyPayload) public yieldStrategyPayloads;
     mapping(uint256 => mapping(address => bool)) public hasVoted;
     mapping(address => bool) public whitelistedTargets;
     mapping(bytes4 => bool) public whitelistedSelectors;
+    address public swapProvider;
 
     event ForumUpdated(address indexed forum);
     event ActionCreated(
@@ -100,6 +135,11 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         uint256 supportBpsThreshold,
         uint256 votingWindow
     );
+    event RwaFundActionCreated(uint256 indexed actionId, bytes32 fundId, uint256 amount, bool isAllocation);
+    event AgentWalletFundCreated(uint256 indexed actionId, address indexed agent, uint256 amount);
+    event SwapProviderActionCreated(uint256 indexed actionId, address indexed newProvider, bytes32 providerNameHash);
+    event YieldStrategyActionCreated(uint256 indexed actionId, bytes32 strategyId, uint256 allocationAmount, uint256 riskTier);
+    event SwapProviderUpdated(address indexed oldProvider, address indexed newProvider);
     event TargetWhitelistUpdated(address indexed target, bool allowed);
     event SelectorWhitelistUpdated(bytes4 indexed selector, bool allowed);
     event ThresholdsUpdated(uint256 supportStake, uint256 uniqueSupporters, uint256 supportBps);
@@ -251,6 +291,156 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
         );
     }
 
+    function createRwaFundAction(
+        uint256 postId,
+        bytes32 fundId,
+        uint256 amount,
+        bool isAllocation,
+        uint256 deadline
+    ) external whenNotPaused returns (uint256 actionId) {
+        if (amount == 0 || deadline <= block.timestamp || fundId == bytes32(0)) revert InvalidAction();
+
+        actionId = nextActionId;
+        nextActionId += 1;
+
+        ActionType aType = isAllocation ? ActionType.ALLOCATE_RWA_FUND : ActionType.REDEEM_RWA_FUND;
+
+        actions[actionId] = Action({
+            id: actionId,
+            postId: postId,
+            proposer: msg.sender,
+            actionType: aType,
+            tokenOut: address(0),
+            amountIn: amount,
+            minAmountOut: 0,
+            deadline: deadline,
+            calldataHash: fundId,
+            status: ActionStatus.CREATED,
+            createdAt: uint64(block.timestamp),
+            executedAt: 0,
+            supportStake: 0,
+            opposeStake: 0,
+            uniqueSupporters: 0
+        });
+
+        rwaFundPayloads[actionId] = RwaFundPayload({fundId: fundId, amount: amount, exists: true});
+
+        emit ActionCreated(actionId, postId, msg.sender, uint8(aType), amount, 0, deadline, fundId);
+        emit RwaFundActionCreated(actionId, fundId, amount, isAllocation);
+    }
+
+    function createAgentWalletFundAction(
+        uint256 postId,
+        address agent,
+        uint256 amount,
+        uint256 deadline
+    ) external whenNotPaused returns (uint256 actionId) {
+        if (agent == address(0) || amount == 0 || deadline <= block.timestamp) revert InvalidAction();
+
+        actionId = nextActionId;
+        nextActionId += 1;
+
+        actions[actionId] = Action({
+            id: actionId,
+            postId: postId,
+            proposer: msg.sender,
+            actionType: ActionType.FUND_AGENT_WALLET,
+            tokenOut: agent,
+            amountIn: amount,
+            minAmountOut: 0,
+            deadline: deadline,
+            calldataHash: bytes32(0),
+            status: ActionStatus.CREATED,
+            createdAt: uint64(block.timestamp),
+            executedAt: 0,
+            supportStake: 0,
+            opposeStake: 0,
+            uniqueSupporters: 0
+        });
+
+        agentWalletPayloads[actionId] = AgentWalletPayload({agent: agent, amount: amount, exists: true});
+
+        emit ActionCreated(actionId, postId, msg.sender, uint8(ActionType.FUND_AGENT_WALLET), amount, 0, deadline, bytes32(0));
+        emit AgentWalletFundCreated(actionId, agent, amount);
+    }
+
+    function createSwapProviderAction(
+        uint256 postId,
+        address newProvider,
+        bytes32 providerNameHash,
+        uint256 deadline
+    ) external whenNotPaused returns (uint256 actionId) {
+        if (newProvider == address(0) || deadline <= block.timestamp) revert InvalidAction();
+
+        actionId = nextActionId;
+        nextActionId += 1;
+
+        actions[actionId] = Action({
+            id: actionId,
+            postId: postId,
+            proposer: msg.sender,
+            actionType: ActionType.SET_SWAP_PROVIDER,
+            tokenOut: newProvider,
+            amountIn: 0,
+            minAmountOut: 0,
+            deadline: deadline,
+            calldataHash: providerNameHash,
+            status: ActionStatus.CREATED,
+            createdAt: uint64(block.timestamp),
+            executedAt: 0,
+            supportStake: 0,
+            opposeStake: 0,
+            uniqueSupporters: 0
+        });
+
+        swapProviderPayloads[actionId] = SwapProviderPayload({newProvider: newProvider, providerNameHash: providerNameHash, exists: true});
+
+        emit ActionCreated(actionId, postId, msg.sender, uint8(ActionType.SET_SWAP_PROVIDER), 0, 0, deadline, providerNameHash);
+        emit SwapProviderActionCreated(actionId, newProvider, providerNameHash);
+    }
+
+    function createYieldStrategyAction(
+        uint256 postId,
+        bytes32 strategyId,
+        uint256 allocationAmount,
+        uint256 riskTier,
+        uint256 deadline
+    ) external whenNotPaused returns (uint256 actionId) {
+        if (strategyId == bytes32(0) || allocationAmount == 0 || deadline <= block.timestamp) revert InvalidAction();
+        if (riskTier > 3) revert InvalidConfig();
+
+        actionId = nextActionId;
+        nextActionId += 1;
+
+        actions[actionId] = Action({
+            id: actionId,
+            postId: postId,
+            proposer: msg.sender,
+            actionType: ActionType.DEPLOY_YIELD_STRATEGY,
+            tokenOut: address(0),
+            amountIn: allocationAmount,
+            minAmountOut: 0,
+            deadline: deadline,
+            calldataHash: strategyId,
+            status: ActionStatus.CREATED,
+            createdAt: uint64(block.timestamp),
+            executedAt: 0,
+            supportStake: 0,
+            opposeStake: 0,
+            uniqueSupporters: 0
+        });
+
+        yieldStrategyPayloads[actionId] = YieldStrategyPayload({
+            strategyId: strategyId,
+            allocationAmount: allocationAmount,
+            riskTier: riskTier,
+            exists: true
+        });
+
+        emit ActionCreated(actionId, postId, msg.sender, uint8(ActionType.DEPLOY_YIELD_STRATEGY), allocationAmount, 0, deadline, strategyId);
+        emit YieldStrategyActionCreated(actionId, strategyId, allocationAmount, riskTier);
+    }
+
     function attachPost(uint256 actionId, uint256 postId, address expectedProposer) external override onlyForum {
         Action storage action = actions[actionId];
         if (action.status == ActionStatus.NONE) revert InvalidAction();
@@ -390,6 +580,87 @@ contract ActionExecutor is IActionExecutor, Ownable, Pausable, ReentrancyGuard {
                 payload.supportBpsThreshold,
                 payload.votingWindow
             )
+        );
+    }
+
+    function executeRwaFundAction(uint256 actionId) external nonReentrant whenNotPaused {
+        Action storage action = actions[actionId];
+        if (action.actionType != ActionType.ALLOCATE_RWA_FUND && action.actionType != ActionType.REDEEM_RWA_FUND) revert InvalidAction();
+
+        _preExecutionChecks(action);
+
+        RwaFundPayload memory payload = rwaFundPayloads[actionId];
+        if (!payload.exists) revert InvalidAction();
+
+        action.status = ActionStatus.EXECUTED;
+        action.executedAt = uint64(block.timestamp);
+        reputation.recordAction(action.proposer, true);
+
+        emit ActionStatusUpdated(actionId, ActionStatus.EXECUTED);
+        emit ActionExecuted(actionId, uint8(action.actionType), true, payload.amount, msg.sender, abi.encode(payload.fundId, payload.amount));
+    }
+
+    function executeAgentWalletFund(uint256 actionId) external nonReentrant whenNotPaused {
+        Action storage action = actions[actionId];
+        if (action.actionType != ActionType.FUND_AGENT_WALLET) revert InvalidAction();
+
+        _preExecutionChecks(action);
+
+        AgentWalletPayload memory payload = agentWalletPayloads[actionId];
+        if (!payload.exists) revert InvalidAction();
+
+        treasuryToken.safeTransfer(payload.agent, payload.amount);
+
+        action.status = ActionStatus.EXECUTED;
+        action.executedAt = uint64(block.timestamp);
+        reputation.recordAction(action.proposer, true);
+
+        emit ActionStatusUpdated(actionId, ActionStatus.EXECUTED);
+        emit ActionExecuted(actionId, uint8(action.actionType), true, payload.amount, msg.sender, abi.encode(payload.agent, payload.amount));
+    }
+
+    function executeSwapProviderChange(uint256 actionId) external nonReentrant whenNotPaused {
+        Action storage action = actions[actionId];
+        if (action.actionType != ActionType.SET_SWAP_PROVIDER) revert InvalidAction();
+
+        _preExecutionChecks(action);
+
+        SwapProviderPayload memory payload = swapProviderPayloads[actionId];
+        if (!payload.exists) revert InvalidAction();
+
+        address oldProvider = swapProvider;
+        swapProvider = payload.newProvider;
+
+        action.status = ActionStatus.EXECUTED;
+        action.executedAt = uint64(block.timestamp);
+        reputation.recordAction(action.proposer, true);
+
+        emit SwapProviderUpdated(oldProvider, payload.newProvider);
+        emit ActionStatusUpdated(actionId, ActionStatus.EXECUTED);
+        emit ActionExecuted(actionId, uint8(action.actionType), true, 0, msg.sender, abi.encode(oldProvider, payload.newProvider));
+    }
+
+    function executeYieldStrategy(uint256 actionId) external nonReentrant whenNotPaused {
+        Action storage action = actions[actionId];
+        if (action.actionType != ActionType.DEPLOY_YIELD_STRATEGY) revert InvalidAction();
+
+        _preExecutionChecks(action);
+
+        YieldStrategyPayload memory payload = yieldStrategyPayloads[actionId];
+        if (!payload.exists) revert InvalidAction();
+
+        action.status = ActionStatus.EXECUTED;
+        action.executedAt = uint64(block.timestamp);
+        reputation.recordAction(action.proposer, true);
+
+        emit ActionStatusUpdated(actionId, ActionStatus.EXECUTED);
+        emit ActionExecuted(
+            actionId,
+            uint8(action.actionType),
+            true,
+            payload.allocationAmount,
+            msg.sender,
+            abi.encode(payload.strategyId, payload.allocationAmount, payload.riskTier)
         );
     }
 
