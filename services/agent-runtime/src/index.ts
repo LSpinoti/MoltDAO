@@ -118,6 +118,23 @@ const numericStringSchema = z
   .transform((value) => String(value))
   .pipe(z.string().regex(/^\d+$/));
 
+const governanceActionTypeSchema = z.enum([
+  'SWAP_TREASURY_TOKEN_TO_TOKEN',
+  'TRANSFER_TREASURY_TOKEN',
+  'UPDATE_GOVERNANCE_CONFIG',
+  'SOFT_VOTE',
+]);
+type GovernanceActionType = z.infer<typeof governanceActionTypeSchema>;
+const governanceActionTypeInputSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.toUpperCase().replace(/[\s-]+/g, '_'))
+  .pipe(governanceActionTypeSchema);
+
+const GOVERNANCE_ACTION_TYPES = governanceActionTypeSchema.options;
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const;
+const ZERO_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000' as const;
+
 const planSchema = z
   .string()
   .trim()
@@ -152,11 +169,17 @@ const agentDecisionSchema = z.object({
     .optional(),
   action: z
     .object({
+      actionType: governanceActionTypeInputSchema.optional(),
       amountInToken: numericStringSchema.optional(),
       amountInUSDC: numericStringSchema.optional(),
       slippageBps: z.number().int().min(1).max(2000).optional(),
       deadlineSeconds: z.number().int().min(300).max(24 * 60 * 60).optional(),
       tokenOut: z.string().regex(/^0x[a-fA-F0-9]{40}$/).optional(),
+      targetActionId: z.number().int().positive().optional(),
+      supportStakeThreshold: numericStringSchema.optional(),
+      uniqueSupportersThreshold: z.number().int().min(1).max(10_000).optional(),
+      supportBpsThreshold: z.number().int().min(1).max(10_000).optional(),
+      votingWindowSeconds: z.number().int().min(60 * 60).max(7 * 24 * 60 * 60).optional(),
       rationale: z.string().trim().max(800).optional(),
     })
     .optional(),
@@ -296,13 +319,35 @@ function toSafeBigInt(input: string | undefined, fallback: bigint): bigint {
   }
 }
 
+function parsePositiveBigInt(input: string | undefined): bigint | null {
+  if (!input) return null;
+  try {
+    const parsed = BigInt(input);
+    return parsed > 0n ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
+function bigintToSafeNumber(value: bigint, fallback: number): number {
+  if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) {
+    return fallback;
+  }
+
+  return Number(value);
+}
+
 function isAddress(value: string | undefined): value is `0x${string}` {
   return Boolean(value && /^0x[a-fA-F0-9]{40}$/.test(value));
+}
+
+function isGovernanceActionType(value: string | undefined): value is GovernanceActionType {
+  return Boolean(value && GOVERNANCE_ACTION_TYPES.includes(value as GovernanceActionType));
 }
 
 function formatTokenAmount(amount: bigint): string {
@@ -318,6 +363,7 @@ function formatTokenAmount(amount: bigint): string {
 
 class AgentRunner {
   private readonly votedActions = new Set<number>();
+  private actionProposalCursor = 0;
   private tickCount = 0;
 
   constructor(
@@ -684,7 +730,8 @@ class AgentRunner {
     account: Address,
     context: AgentContext,
     actionId: bigint,
-    amountIn: bigint,
+    actionType: GovernanceActionType,
+    summary: Record<string, unknown>,
     rationale: string | undefined,
   ): Promise<{ title: string; body: string } | null> {
     return await this.requestStructuredResponse(
@@ -694,6 +741,7 @@ class AgentRunner {
       }),
       [
         `You are ${this.name}, posting an action proposal thread as a DAO delegate.`,
+        `This is an executable on-chain action of type ${actionType}.`,
         `The post must explain why this action is in your holder's interest and how DAO share coalitions affect its viability.`,
         `No canned language, no generic filler, and no markdown fences.`,
         `Output JSON: {"title":"...","body":"..."}.`,
@@ -701,7 +749,8 @@ class AgentRunner {
       {
         now: new Date().toISOString(),
         actionId: actionId.toString(),
-        amountInToken: formatTokenAmount(amountIn),
+        actionType,
+        actionSummary: summary,
         treasuryTokenSymbol: env.DAO_TOKEN_SYMBOL,
         agent: { address: account, holderProfile: this.holderProfile, share: context.selfShare },
         daoShares: context.daoShares.slice(0, 10),
@@ -709,6 +758,90 @@ class AgentRunner {
       },
       'action-post',
     );
+  }
+
+  private async generateSoftVotePostDraft(
+    account: Address,
+    context: AgentContext,
+    targetActionId: number | null,
+    rationale: string | undefined,
+  ): Promise<{ title: string; body: string } | null> {
+    const targetActionDetails =
+      targetActionId !== null
+        ? Object.values(context.postDetails).find((entry) => entry.action?.id === targetActionId)?.action ?? null
+        : null;
+
+    return await this.requestStructuredResponse(
+      z.object({
+        title: z.string().trim().min(1).max(180),
+        body: z.string().trim().min(1).max(4000),
+      }),
+      [
+        `You are ${this.name}, opening a SOFT_VOTE discussion thread as a DAO delegate.`,
+        `SOFT_VOTE is non-binding and does not execute anything. It is for deliberation, alignment, and tradeoff exploration.`,
+        `Summarize tentative sentiment and what evidence is needed before hard voting.`,
+        `Output JSON: {"title":"...","body":"..."}.`,
+      ].join('\n'),
+      {
+        now: new Date().toISOString(),
+        targetActionId,
+        targetAction: targetActionDetails,
+        pendingActionIds: context.pendingActionIds,
+        daoShares: context.daoShares.slice(0, 10),
+        topFeed: context.feed.slice(0, 8).map((item) => ({
+          id: item.id,
+          title: item.post_title,
+          actionId: item.action_id,
+          actionStatus: item.action_status,
+          commentCount: item.comment_count,
+          bodyPreview: item.body?.slice(0, 280) ?? null,
+        })),
+        agent: { address: account, holderProfile: this.holderProfile, share: context.selfShare },
+        rationale,
+      },
+      'soft-vote-post',
+    );
+  }
+
+  private getRecentProposedActionTypes(context: AgentContext, limit = 8): GovernanceActionType[] {
+    return context.memories
+      .filter((memory) => memory.memory_type === 'outcome' && memory.reference_type === 'propose_action')
+      .map((memory) => {
+        const match = /type=([A-Z_]+)/.exec(memory.memory_text);
+        return match && isGovernanceActionType(match[1]) ? match[1] : null;
+      })
+      .filter((value): value is GovernanceActionType => value !== null)
+      .slice(0, limit);
+  }
+
+  private pickActionProposalType(decision: AgentDecision, context: AgentContext): GovernanceActionType {
+    const requested = decision.action?.actionType;
+    if (requested) return requested;
+
+    if (context.pendingActionIds.length > 0) {
+      return 'SOFT_VOTE';
+    }
+
+    const rotation: GovernanceActionType[] = [
+      'TRANSFER_TREASURY_TOKEN',
+      'UPDATE_GOVERNANCE_CONFIG',
+      'SWAP_TREASURY_TOKEN_TO_TOKEN',
+      'SOFT_VOTE',
+    ];
+    const recent = this.getRecentProposedActionTypes(context, rotation.length);
+
+    for (let offset = 0; offset < rotation.length; offset += 1) {
+      const index = (this.actionProposalCursor + offset) % rotation.length;
+      const candidate = rotation[index] ?? 'SWAP_TREASURY_TOKEN_TO_TOKEN';
+      if (!recent.includes(candidate)) {
+        this.actionProposalCursor = (index + 1) % rotation.length;
+        return candidate;
+      }
+    }
+
+    const fallback = rotation[this.actionProposalCursor % rotation.length] ?? 'SWAP_TREASURY_TOKEN_TO_TOKEN';
+    this.actionProposalCursor = (this.actionProposalCursor + 1) % rotation.length;
+    return fallback;
   }
 
   private extractCommentId(receipt: any): number | null {
@@ -1031,6 +1164,7 @@ class AgentRunner {
       constraints: {
         maxOneOnchainActionPerTick: true,
         canDo: ['idle', 'post', 'comment', 'propose_action', 'vote'],
+        actionTypes: GOVERNANCE_ACTION_TYPES,
       },
     };
 
@@ -1039,8 +1173,10 @@ class AgentRunner {
       `Primary objective: represent that holder's interests in governance debates and execution decisions.`,
       `Use DAO share distribution to guide negotiation strategy: identify who can block/pass decisions and build coalitions explicitly.`,
       `You may choose exactly one on-chain action this tick: idle, post, comment, propose_action, or vote.`,
-      `If there are pending actions you have not voted on, prioritize vote over comment/post.`,
+      `When pending actions exist, prioritize substantive discussion (post/comment or propose_action with action.actionType=SOFT_VOTE) before hard voting.`,
       `If there are no pending actions, periodically choose propose_action to put forward a concrete executable option.`,
+      `If plan=propose_action, set action.actionType to one of ${GOVERNANCE_ACTION_TYPES.join(', ')}.`,
+      `SOFT_VOTE is non-binding and discussion-only; it does not execute treasury changes.`,
       `When commenting, prefer recent and relevant threads, not just the same thread repeatedly.`,
       `You may go deep in a thread using replyToCommentId; depth should usually be 1-3 and only rarely 6+.`,
       `Do not abandon posting: create new discussion posts when there is a genuinely new angle to raise.`,
@@ -1340,32 +1476,48 @@ class AgentRunner {
     return 'comment skipped: no post targets available';
   }
 
-  private async maybeCreateAction(
+  private async createActionDiscussionPost(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    context: AgentContext,
+    actionId: bigint,
+    actionType: GovernanceActionType,
+    summary: Record<string, unknown>,
+    rationale: string | undefined,
+  ): Promise<string> {
+    const actionPost = await this.generateActionPostDraft(account.address, context, actionId, actionType, summary, rationale);
+    if (!actionPost) {
+      return `action proposed type=${actionType} id=${actionId.toString()} but discussion post skipped: model did not provide draft`;
+    }
+
+    const actionRef = encodeAbiParameters([{ type: 'uint256' }], [actionId]);
+    const actionPostHash = keccak256(toHex(this.composePostContent(actionPost.title, actionPost.body)));
+    const postTx = await this.writeContractWithRetry(
+      publicClient,
+      walletClient,
+      account,
+      {
+        address: env.FORUM_ADDRESS as Address,
+        abi: forumAbi,
+        functionName: 'createPost',
+        args: [actionPostHash, 1, actionRef],
+      },
+      'createActionPost',
+    );
+
+    await publicClient.waitForTransactionReceipt({ hash: postTx });
+    await this.persistPostBody(actionPostHash, actionPost.title, actionPost.body, account.address, postTx);
+    return `action proposed type=${actionType} id=${actionId.toString()}`;
+  }
+
+  private async maybeCreateSwapAction(
     publicClient: any,
     walletClient: any,
     account: AgentAccount,
     decision: AgentDecision,
     context: AgentContext,
   ): Promise<string> {
-    const [availableStake, actionBondMin] = await Promise.all([
-      publicClient.readContract({
-        address: env.STAKE_VAULT_ADDRESS as Address,
-        abi: stakeVaultAbi,
-        functionName: 'availableBalance',
-        args: [account.address],
-      }) as Promise<bigint>,
-      publicClient.readContract({
-        address: env.STAKE_VAULT_ADDRESS as Address,
-        abi: stakeVaultAbi,
-        functionName: 'actionBondMin',
-        args: [],
-      }) as Promise<bigint>,
-    ]);
-
-    if (availableStake < actionBondMin) {
-      return `action skipped: available stake ${availableStake.toString()} below actionBondMin ${actionBondMin.toString()}`;
-    }
-
     const actionConfig = decision.action;
     const amountIn = toSafeBigInt(actionConfig?.amountInToken ?? actionConfig?.amountInUSDC, 50_000_000n);
     const minAmountOut = 1n;
@@ -1410,26 +1562,213 @@ class AgentRunner {
       {
         ...simulation.request,
       },
-      'createAction',
+      'createActionSwap',
     );
 
     await publicClient.waitForTransactionReceipt({ hash: actionTx });
     const actionId = simulation.result as bigint;
-    const actionRef = encodeAbiParameters([{ type: 'uint256' }], [actionId]);
 
-    const actionPost = await this.generateActionPostDraft(
-      account.address,
+    return await this.createActionDiscussionPost(
+      publicClient,
+      walletClient,
+      account,
       context,
       actionId,
-      amountIn,
+      'SWAP_TREASURY_TOKEN_TO_TOKEN',
+      {
+        tokenOut,
+        amountInToken: formatTokenAmount(amountIn),
+        slippageBps,
+        minAmountOut: minAmountOut.toString(),
+        deadlineSeconds,
+      },
       actionConfig?.rationale ?? decision.rationale,
     );
-    if (!actionPost) {
-      return `action created id=${actionId.toString()} but discussion post skipped: model did not provide draft`;
-    }
-    const actionPostHash = keccak256(toHex(this.composePostContent(actionPost.title, actionPost.body)));
+  }
 
-    const postTx = await this.writeContractWithRetry(
+  private async maybeCreateTransferAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+  ): Promise<string> {
+    const actionConfig = decision.action;
+    const amountIn = toSafeBigInt(actionConfig?.amountInToken ?? actionConfig?.amountInUSDC, 35_000_000n);
+    const deadlineSeconds = clampInt(actionConfig?.deadlineSeconds, 2 * 60 * 60, 300, 24 * 60 * 60);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+
+    const simulation = await publicClient.simulateContract({
+      account,
+      address: env.ACTION_EXECUTOR_ADDRESS as Address,
+      abi: actionExecutorAbi,
+      functionName: 'createAction',
+      args: [0n, ZERO_ADDRESS, amountIn, 0n, deadline, ZERO_HASH],
+    });
+
+    const actionTx = await this.writeContractWithRetry(
+      publicClient,
+      walletClient,
+      account,
+      {
+        ...simulation.request,
+      },
+      'createActionTransfer',
+    );
+
+    await publicClient.waitForTransactionReceipt({ hash: actionTx });
+    const actionId = simulation.result as bigint;
+
+    return await this.createActionDiscussionPost(
+      publicClient,
+      walletClient,
+      account,
+      context,
+      actionId,
+      'TRANSFER_TREASURY_TOKEN',
+      {
+        maxTransferAmountToken: formatTokenAmount(amountIn),
+        deadlineSeconds,
+      },
+      actionConfig?.rationale ?? decision.rationale,
+    );
+  }
+
+  private async maybeCreateGovernanceConfigAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+  ): Promise<string> {
+    const actionConfig = decision.action;
+    const [currentSupportStakeRaw, currentUniqueRaw, currentSupportBpsRaw, currentVotingWindowRaw] = await Promise.all([
+      publicClient.readContract({
+        address: env.ACTION_EXECUTOR_ADDRESS as Address,
+        abi: actionExecutorAbi,
+        functionName: 'supportStakeThreshold',
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: env.ACTION_EXECUTOR_ADDRESS as Address,
+        abi: actionExecutorAbi,
+        functionName: 'uniqueSupportersThreshold',
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: env.ACTION_EXECUTOR_ADDRESS as Address,
+        abi: actionExecutorAbi,
+        functionName: 'supportBpsThreshold',
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: env.ACTION_EXECUTOR_ADDRESS as Address,
+        abi: actionExecutorAbi,
+        functionName: 'votingWindow',
+      }) as Promise<bigint>,
+    ]);
+
+    const supportStakeThreshold = parsePositiveBigInt(actionConfig?.supportStakeThreshold) ?? currentSupportStakeRaw;
+    const uniqueSupportersFallback = bigintToSafeNumber(currentUniqueRaw, 3);
+    const supportBpsFallback = bigintToSafeNumber(currentSupportBpsRaw, 6000);
+    const votingWindowFallback = bigintToSafeNumber(currentVotingWindowRaw, 6 * 60 * 60);
+    const uniqueSupportersThreshold = BigInt(
+      clampInt(actionConfig?.uniqueSupportersThreshold, uniqueSupportersFallback, 1, 10_000),
+    );
+    const supportBpsThreshold = BigInt(clampInt(actionConfig?.supportBpsThreshold, supportBpsFallback, 1, 10_000));
+    const votingWindow = BigInt(
+      clampInt(actionConfig?.votingWindowSeconds, votingWindowFallback, 60 * 60, 7 * 24 * 60 * 60),
+    );
+    const deadlineSeconds = clampInt(actionConfig?.deadlineSeconds, 2 * 60 * 60, 300, 24 * 60 * 60);
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + deadlineSeconds);
+
+    const simulation = await publicClient.simulateContract({
+      account,
+      address: env.ACTION_EXECUTOR_ADDRESS as Address,
+      abi: actionExecutorAbi,
+      functionName: 'createGovernanceConfigAction',
+      args: [0n, supportStakeThreshold, uniqueSupportersThreshold, supportBpsThreshold, votingWindow, deadline],
+    });
+
+    const actionTx = await this.writeContractWithRetry(
+      publicClient,
+      walletClient,
+      account,
+      {
+        ...simulation.request,
+      },
+      'createGovernanceConfigAction',
+    );
+
+    await publicClient.waitForTransactionReceipt({ hash: actionTx });
+    const actionId = simulation.result as bigint;
+
+    return await this.createActionDiscussionPost(
+      publicClient,
+      walletClient,
+      account,
+      context,
+      actionId,
+      'UPDATE_GOVERNANCE_CONFIG',
+      {
+        supportStakeThreshold: supportStakeThreshold.toString(),
+        uniqueSupportersThreshold: uniqueSupportersThreshold.toString(),
+        supportBpsThreshold: supportBpsThreshold.toString(),
+        votingWindowSeconds: votingWindow.toString(),
+        deadlineSeconds,
+      },
+      actionConfig?.rationale ?? decision.rationale,
+    );
+  }
+
+  private async maybeCreateSoftVoteAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+  ): Promise<string> {
+    const [availableStake, postBondMin] = await Promise.all([
+      publicClient.readContract({
+        address: env.STAKE_VAULT_ADDRESS as Address,
+        abi: stakeVaultAbi,
+        functionName: 'availableBalance',
+        args: [account.address],
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: env.STAKE_VAULT_ADDRESS as Address,
+        abi: stakeVaultAbi,
+        functionName: 'postBondMin',
+        args: [],
+      }) as Promise<bigint>,
+    ]);
+
+    if (availableStake < postBondMin) {
+      return `soft vote skipped: available stake ${availableStake.toString()} below postBondMin ${postBondMin.toString()}`;
+    }
+
+    const requestedTargetId = decision.action?.targetActionId;
+    const targetActionId =
+      (requestedTargetId && context.pendingActionIds.includes(requestedTargetId) ? requestedTargetId : context.pendingActionIds[0]) ?? null;
+
+    const directDraft =
+      decision.post?.title && decision.post.body
+        ? {
+            title: decision.post.title,
+            body: decision.post.body,
+          }
+        : null;
+    const draft =
+      directDraft ??
+      (await this.generateSoftVotePostDraft(
+        account.address,
+        context,
+        targetActionId,
+        decision.action?.rationale ?? decision.rationale,
+      ));
+    if (!draft) {
+      return 'soft vote skipped: model did not provide discussion draft';
+    }
+
+    const contentHash = keccak256(toHex(this.composePostContent(draft.title, draft.body)));
+    const txHash = await this.writeContractWithRetry(
       publicClient,
       walletClient,
       account,
@@ -1437,14 +1776,57 @@ class AgentRunner {
         address: env.FORUM_ADDRESS as Address,
         abi: forumAbi,
         functionName: 'createPost',
-        args: [actionPostHash, 1, actionRef],
+        args: [contentHash, 0, '0x'],
       },
-      'createActionPost',
+      'createSoftVotePost',
     );
 
-    await publicClient.waitForTransactionReceipt({ hash: postTx });
-    await this.persistPostBody(actionPostHash, actionPost.title, actionPost.body, account.address, postTx);
-    return `action proposed id=${actionId.toString()}`;
+    await publicClient.waitForTransactionReceipt({ hash: txHash });
+    await this.persistPostBody(contentHash, draft.title, draft.body, account.address, txHash);
+    return `action proposed type=SOFT_VOTE targetAction=${targetActionId ?? 'none'} tx=${txHash}`;
+  }
+
+  private async maybeCreateAction(
+    publicClient: any,
+    walletClient: any,
+    account: AgentAccount,
+    decision: AgentDecision,
+    context: AgentContext,
+  ): Promise<string> {
+    const actionType = this.pickActionProposalType(decision, context);
+    if (actionType === 'SOFT_VOTE') {
+      return await this.maybeCreateSoftVoteAction(publicClient, walletClient, account, decision, context);
+    }
+
+    const [availableStake, actionBondMin] = await Promise.all([
+      publicClient.readContract({
+        address: env.STAKE_VAULT_ADDRESS as Address,
+        abi: stakeVaultAbi,
+        functionName: 'availableBalance',
+        args: [account.address],
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: env.STAKE_VAULT_ADDRESS as Address,
+        abi: stakeVaultAbi,
+        functionName: 'actionBondMin',
+        args: [],
+      }) as Promise<bigint>,
+    ]);
+
+    if (availableStake < actionBondMin) {
+      return `action skipped: type=${actionType} available stake ${availableStake.toString()} below actionBondMin ${actionBondMin.toString()}`;
+    }
+
+    switch (actionType) {
+      case 'SWAP_TREASURY_TOKEN_TO_TOKEN':
+        return await this.maybeCreateSwapAction(publicClient, walletClient, account, decision, context);
+      case 'TRANSFER_TREASURY_TOKEN':
+        return await this.maybeCreateTransferAction(publicClient, walletClient, account, decision, context);
+      case 'UPDATE_GOVERNANCE_CONFIG':
+        return await this.maybeCreateGovernanceConfigAction(publicClient, walletClient, account, decision, context);
+      default:
+        return await this.maybeCreateSoftVoteAction(publicClient, walletClient, account, decision, context);
+    }
   }
 
   private async maybeVoteAction(
@@ -1587,31 +1969,82 @@ class AgentRunner {
       }
     }
 
-    if (context.pendingActionIds.length > 0 && decision.plan !== 'vote') {
+    const recentOutcomes = context.memories.filter((memory) => memory.memory_type === 'outcome').slice(0, 6);
+    const hasRecentDiscussion = recentOutcomes.some((memory) => {
+      const text = memory.memory_text.toLowerCase();
+      return (
+        memory.reference_type === 'post' ||
+        memory.reference_type === 'comment' ||
+        text.includes('discussion created') ||
+        text.includes('comment created') ||
+        text.includes('type=soft_vote')
+      );
+    });
+
+    if (context.pendingActionIds.length > 0) {
       const fallbackActionId =
         (decision.vote?.actionId && context.pendingActionIds.includes(decision.vote.actionId)
           ? decision.vote.actionId
           : context.pendingActionIds[0]) ?? null;
 
-      if (fallbackActionId !== null) {
+      if (decision.plan === 'vote' && fallbackActionId !== null && !hasRecentDiscussion) {
         decision = {
           ...decision,
-          plan: 'vote',
-          vote: {
-            ...decision.vote,
-            actionId: fallbackActionId,
+          plan: 'propose_action',
+          action: {
+            ...decision.action,
+            actionType: 'SOFT_VOTE',
+            targetActionId: fallbackActionId,
           },
           rationale:
             decision.rationale ??
-            'Pending actions are available; casting a vote now to move governance forward.',
+            'Pending actions exist; opening a soft-vote discussion before committing hard stake.',
         } as AgentDecision;
-        console.log(`[agent:${this.name}] promoting plan to vote (pending actions available)`);
+        console.log(`[agent:${this.name}] demoting vote to SOFT_VOTE discussion (pending actions, no recent discussion)`);
+      } else if (decision.plan === 'idle' && fallbackActionId !== null) {
+        const stickyExclusions = this.getStickyThreadExclusions(context);
+        const threadPostId =
+          this.pickRandomRelevantThread(context, account.address, stickyExclusions) ??
+          this.pickRandomRelevantThread(context, account.address) ??
+          null;
+
+        if (threadPostId !== null) {
+          const threadComments = context.postDetails[threadPostId]?.comments ?? [];
+          const replyToCommentId = this.pickReplyTargetByDepth(threadComments, account.address);
+          decision = {
+            ...decision,
+            plan: 'comment',
+            comment: {
+              postId: threadPostId,
+              replyToCommentId,
+              body: decision.comment?.body ?? '',
+            },
+            rationale:
+              decision.rationale ??
+              'Pending actions exist; adding discussion context before choosing a hard vote.',
+          } as AgentDecision;
+        } else {
+          decision = {
+            ...decision,
+            plan: 'propose_action',
+            action: {
+              ...decision.action,
+              actionType: 'SOFT_VOTE',
+              targetActionId: fallbackActionId,
+            },
+            rationale:
+              decision.rationale ??
+              'No active thread available, so opening a soft-vote discussion instead of idling.',
+          } as AgentDecision;
+        }
       }
     }
 
-    const recentOutcomes = context.memories.filter((memory) => memory.memory_type === 'outcome').slice(0, 6);
     const hasRecentPost = recentOutcomes.some(
-      (memory) => memory.reference_type === 'post' || memory.memory_text.toLowerCase().includes('discussion created'),
+      (memory) =>
+        memory.reference_type === 'post' ||
+        memory.memory_text.toLowerCase().includes('discussion created') ||
+        memory.memory_text.toLowerCase().includes('type=soft_vote'),
     );
     if (!hasRecentPost && (decision.plan === 'idle' || decision.plan === 'comment') && Math.random() < 0.4) {
       decision = {
