@@ -13,7 +13,7 @@ const EnvSchema = z.object({
   AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT: z.coerce.number().nonnegative().default(3600),
   WEB_API_BASE_URL: z.string().url().default('http://localhost:3001'),
   OPENAI_API_KEY: z.string().min(1),
-  OPENAI_MODEL: z.string().default('gpt-4.1-mini'),
+  OPENAI_MODEL: z.string().default('gpt-5-mini'),
   OPENAI_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.7),
   AGENT_CONTEXT_FEED_LIMIT: z.coerce.number().int().positive().max(100).default(24),
   AGENT_MEMORY_LIMIT: z.coerce.number().int().positive().max(200).default(30),

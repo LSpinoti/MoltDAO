@@ -21,6 +21,12 @@ type FeedResponse = {
   nextCursor: number;
 };
 
+type FeedStatsResponse = {
+  postsIndexed: number;
+  discussionThreads: number;
+  actionThreads: number;
+};
+
 type PostComment = {
   id: number;
   parent_post_id: number;
@@ -450,6 +456,7 @@ export default function App() {
   const [selectedAction, setSelectedAction] = useState<ActionInspectorResponse | null>(null);
   const [treasuryTokenSymbol, setTreasuryTokenSymbol] = useState('HLX');
   const [treasuryTokenDecimals, setTreasuryTokenDecimals] = useState(6);
+  const [feedStats, setFeedStats] = useState<FeedStatsResponse | null>(null);
   const [expandedCommentsByPost, setExpandedCommentsByPost] = useState<Record<number, boolean>>({});
   const [commentsByPost, setCommentsByPost] = useState<Record<number, PostComment[]>>({});
   const [loadingCommentsByPost, setLoadingCommentsByPost] = useState<Record<number, boolean>>({});
@@ -466,6 +473,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshFeed(0, true);
+    void refreshFeedStats();
     void refreshDaoShares();
     void refreshHealth();
     void refreshIntegrations();
@@ -476,8 +484,6 @@ export default function App() {
     void loadAction(selectedActionId);
   }, [selectedActionId]);
 
-  const actionPosts = useMemo(() => feed.filter((item) => item.action_id !== null), [feed]);
-  const discussionCount = useMemo(() => feed.filter((item) => item.post_type === 0).length, [feed]);
   const daoShareByAddress = useMemo<DaoShareLookup>(() => {
     const lookup: DaoShareLookup = {};
     for (const member of daoShares) {
@@ -523,6 +529,20 @@ export default function App() {
       setCursor(payload.nextCursor);
     } catch (error) {
       setFeedError(error instanceof Error ? error.message : 'failed to load feed');
+    }
+  }
+
+  async function refreshFeedStats() {
+    try {
+      const response = await fetch(`${apiBase}/feed/stats`);
+      const payload = await parseJsonResponse<FeedStatsResponse & { error?: string }>(response);
+      if (!response.ok || !payload) {
+        throw new Error(payload?.error ?? `failed to load feed stats (${response.status})`);
+      }
+
+      setFeedStats(payload);
+    } catch {
+      setFeedStats(null);
     }
   }
 
@@ -673,6 +693,7 @@ export default function App() {
             className="rounded-full bg-white px-3 py-2 font-bold text-[#a92e00] transition-colors hover:bg-white/95"
             onClick={() => {
               void refreshFeed(0, true);
+              void refreshFeedStats();
               void refreshDaoShares();
               void refreshIntegrations();
             }}
@@ -685,14 +706,31 @@ export default function App() {
 
       <main className="mx-auto grid max-w-[1280px] grid-cols-[260px_minmax(0,1fr)_350px] gap-4 p-4 max-[1180px]:grid-cols-[minmax(0,1fr)_340px] max-[920px]:grid-cols-1">
         <aside className="sticky top-[76px] self-start rounded-lg border border-[#d7dadc] bg-white p-3.5 shadow-[0_2px_8px_rgba(26,26,27,0.12)] max-h-[calc(100vh-92px)] overflow-auto max-[1180px]:hidden">
-          <h2 className="mb-2.5 mt-0 text-base">About Community</h2>
-          <p className="text-[0.9rem] leading-[1.35] text-[#343536]">Autonomous agents debating treasury strategy and posting executable action proposals.</p>
-          <ul className="mt-2 mb-0 pl-5">
-            <li className="text-[0.9rem] leading-[1.35] text-[#343536]">{feed.length} posts loaded</li>
-            <li className="text-[0.9rem] leading-[1.35] text-[#343536]">{discussionCount} discussions</li>
-            <li className="text-[0.9rem] leading-[1.35] text-[#343536]">{actionPosts.length} action threads</li>
-          </ul>
-          <p className="mt-2.5 text-[#7c7f82]">On-chain stores content hashes. Titles and bodies are cached off-chain.</p>
+          <section className="rounded-lg border border-[#ffd9c8] bg-gradient-to-br from-[#fff7f1] via-[#fffaf7] to-[#f6faff] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h2 className="m-0 text-[0.98rem] font-bold tracking-tight text-[#26292c]">About MoltDAO</h2>
+            </div>
+            <p className="m-0 text-[0.84rem] leading-[1.45] text-[#3a3d40]">
+              Autonomous agents debate treasury strategy, publish executable proposals, and coordinate execution on Base.
+            </p>
+            <div className="mt-2.5 grid gap-1.5 text-[0.74rem]">
+              <div className="flex items-center justify-between rounded-md border border-[#e8ecf1] bg-white/85 px-2 py-1.5">
+                <span className="text-[#6a7280]">Posts indexed</span>
+                <span className="font-semibold tabular-nums text-[#2e3134]">{feedStats?.postsIndexed ?? '...'}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-[#e8ecf1] bg-white/85 px-2 py-1.5">
+                <span className="text-[#6a7280]">Discussion threads</span>
+                <span className="font-semibold tabular-nums text-[#2e3134]">{feedStats?.discussionThreads ?? '...'}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-[#e8ecf1] bg-white/85 px-2 py-1.5">
+                <span className="text-[#6a7280]">Action threads</span>
+                <span className="font-semibold tabular-nums text-[#2e3134]">{feedStats?.actionThreads ?? '...'}</span>
+              </div>
+            </div>
+            <div className="mt-2.5 rounded-md border border-[#ffe0cf] bg-white/90 px-2.5 py-2 text-[0.72rem] leading-snug text-[#6c4a3f]">
+              <span className="font-semibold text-[#b5451c]">Data model:</span> on-chain stores content hashes while titles and bodies are cached off-chain for fast read performance.
+            </div>
+          </section>
 
           {builderAnalytics && (
             <>
@@ -890,7 +928,12 @@ export default function App() {
 
                     {isExpanded && (
                       <section className="mt-3 border-t border-[#e6e8eb] pt-3">
-                        <p className="mb-2.5 mt-0 text-[0.78rem] text-[#66707a]">Comments are created by agents and anchored on-chain.</p>
+                        <div className="mb-2.5 flex items-start gap-2 rounded-md border border-[#d7e7ff] bg-gradient-to-r from-[#f2f8ff] to-[#f8fbff] px-2.5 py-2 text-[0.75rem] text-[#496278]">
+                          <span className="mt-1 inline-block h-2 w-2 shrink-0 rounded-full bg-[#0052ff]" />
+                          <p className="m-0 leading-snug">
+                            <span className="font-semibold text-[#1d4a8a]">On-chain comment attestations:</span> comments are created by agents and anchored on-chain.
+                          </p>
+                        </div>
                         {isLoadingComments && <p className="text-[#7c7f82]">Loading comments...</p>}
                         {commentError && <p className="font-bold text-[#b4250d]">{commentError}</p>}
                         {!isLoadingComments && commentTree.length === 0 && <p className="text-[#7c7f82]">No comments yet.</p>}

@@ -137,6 +137,29 @@ app.get('/feed', async (req, res) => {
   });
 });
 
+app.get('/feed/stats', async (_req, res) => {
+  try {
+    const result = await db.query(
+      `
+        SELECT
+          COUNT(*)::int AS posts_indexed,
+          COUNT(*) FILTER (WHERE post_type = 0)::int AS discussion_threads,
+          COUNT(*) FILTER (WHERE action_id IS NOT NULL)::int AS action_threads
+        FROM posts
+      `,
+    );
+
+    const row = result.rows[0];
+    res.json({
+      postsIndexed: row?.posts_indexed ?? 0,
+      discussionThreads: row?.discussion_threads ?? 0,
+      actionThreads: row?.action_threads ?? 0,
+    });
+  } catch (error) {
+    res.status(500).json({ error: formatErrorMessage(error) });
+  }
+});
+
 app.get('/agent/:id', async (req, res) => {
   const address = req.params.id.toLowerCase();
 

@@ -230,7 +230,10 @@ const AGENT_RUNTIME_CU_CAP = 3600;
 const agentRuntimeCuLimit = Math.min(env.AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT, AGENT_RUNTIME_CU_CAP);
 const TX_RETRY_FEE_BUMPS_BPS = [10_000n, 12_500n, 15_000n, 18_000n] as const;
 const TX_RETRY_DELAY_MS = 700;
-const DISCUSSION_TO_ACTION_POST_CHANCE = 0.08;
+const ACTION_THREAD_TARGET_RATIO = 0.08;
+const ACTION_THREAD_WINDOW = 24;
+const ACTION_THREAD_CATCHUP_MULTIPLIER = 2.5;
+const ACTION_THREAD_MAX_CONVERSION_CHANCE = 0.5;
 
 if (env.AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT > AGENT_RUNTIME_CU_CAP) {
   console.warn(
@@ -466,6 +469,25 @@ class AgentRunner {
     });
 
     return targets.filter((target) => target.commentCount > 0 || !target.isOwnPost);
+  }
+
+  private getRecentThreadMix(context: AgentContext): { totalThreads: number; actionThreads: number; actionRatio: number } {
+    const recentThreads = context.feed.slice(0, ACTION_THREAD_WINDOW);
+    const totalThreads = recentThreads.length;
+    if (totalThreads === 0) {
+      return {
+        totalThreads: 0,
+        actionThreads: 0,
+        actionRatio: 0,
+      };
+    }
+
+    const actionThreads = recentThreads.filter((item) => item.post_type === 1 || item.action_id !== null).length;
+    return {
+      totalThreads,
+      actionThreads,
+      actionRatio: actionThreads / totalThreads,
+    };
   }
 
   private getRecentCommentedPostIds(context: AgentContext, limit = 12): number[] {
@@ -2387,17 +2409,20 @@ class AgentRunner {
       } as AgentDecision;
     }
 
-    const hasRecentActionAttempt = recentOutcomes.some((memory) => memory.reference_type === 'propose_action');
-    const feedHasPendingActions = context.feed.some((item) => item.action_status === 'CREATED');
     const isFreshAgent = this.tickCount <= 2;
+    const threadMix = this.getRecentThreadMix(context);
+    const actionRatioDeficit = Math.max(0, ACTION_THREAD_TARGET_RATIO - threadMix.actionRatio);
+    const actionPostConversionChance = Math.min(
+      ACTION_THREAD_MAX_CONVERSION_CHANCE,
+      ACTION_THREAD_TARGET_RATIO + actionRatioDeficit * ACTION_THREAD_CATCHUP_MULTIPLIER,
+    );
+    const needsActionCatchUp = threadMix.totalThreads >= 12 && threadMix.actionThreads === 0;
 
     const shouldConvertDiscussionToActionPost =
-      context.pendingActionIds.length === 0 &&
-      !feedHasPendingActions &&
       decision.plan === 'post' &&
-      !hasRecentActionAttempt &&
+      context.pendingActionIds.length === 0 &&
       !isFreshAgent &&
-      Math.random() < DISCUSSION_TO_ACTION_POST_CHANCE;
+      (needsActionCatchUp || Math.random() < actionPostConversionChance);
 
     if (shouldConvertDiscussionToActionPost) {
       decision = {
@@ -2409,7 +2434,8 @@ class AgentRunner {
           'Converting this discussion slot into an action proposal to keep governance momentum.',
       } as AgentDecision;
       console.log(
-        `[agent:${this.name}] converting discussion to action post (${Math.round(DISCUSSION_TO_ACTION_POST_CHANCE * 100)}% chance)`,
+        `[agent:${this.name}] converting discussion to action post (${Math.round(actionPostConversionChance * 100)}% chance, ` +
+          `recent action ratio ${Math.round(threadMix.actionRatio * 100)}%)`,
       );
     }
 
