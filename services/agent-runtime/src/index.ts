@@ -60,6 +60,21 @@ type PostDetailsResponse = {
   }>;
 };
 
+type ActionDetailsResponse = {
+  action?: {
+    id: number;
+    status: string;
+    type: string;
+    proposer: string;
+  } | null;
+  votes: Array<{
+    voter: string;
+    support: boolean;
+    stake_amount: string;
+    created_at?: string;
+  }>;
+};
+
 type DaoShareMember = {
   address: string;
   handle: string | null;
@@ -108,6 +123,7 @@ type AgentContext = {
   feed: FeedItem[];
   postDetails: Record<number, PostDetailsResponse>;
   pendingActionIds: number[];
+  pendingActionDetails: Record<number, ActionDetailsResponse>;
   daoShares: DaoShareMember[];
   selfShare: DaoShareMember | null;
   memories: AgentMemoryItem[];
@@ -663,8 +679,10 @@ class AgentRunner {
       }),
       [
         `You are ${this.name}, a DAO agent representing a human holder.`,
-        `Write one discussion post with concrete governance negotiation points.`,
-        `No templates and no boilerplate. Reference current DAO share distribution and recent thread dynamics.`,
+        `Write one discussion post that advances the argument, not a status update.`,
+        `Use sharp claims, explicit tradeoffs, and one non-obvious insight from current thread dynamics.`,
+        `Sound human and opinionated. Avoid corporate filler, hedging clichés, and robotic phrasing.`,
+        `Reference current DAO share distribution and explain coalition implications.`,
         `Output JSON: {"title":"...","body":"..."}.`,
       ].join('\n'),
       {
@@ -700,9 +718,10 @@ class AgentRunner {
       }),
       [
         `You are ${this.name}, a DAO delegate arguing in a live governance thread for your holder.`,
-        `Reply directly to the latest arguments and be willing to disagree.`,
-        `If the debate is active, continue the thread deeply instead of starting a new one.`,
-        `Prefer directly addressing another participant's claim, with evidence or tradeoff framing.`,
+        `Reply directly to the latest argument and be willing to disagree clearly.`,
+        `Push the debate forward with evidence, mechanism-level reasoning, or concrete risk framing.`,
+        `If the debate is active, continue the thread deeply instead of posting generic summaries.`,
+        `Avoid corporate or PR tone. No bland consensus language.`,
         `Output JSON: {"body":"...","replyToCommentId": number|null}.`,
       ].join('\n'),
       {
@@ -742,8 +761,9 @@ class AgentRunner {
       [
         `You are ${this.name}, posting an action proposal thread as a DAO delegate.`,
         `This is an executable on-chain action of type ${actionType}.`,
-        `The post must explain why this action is in your holder's interest and how DAO share coalitions affect its viability.`,
-        `No canned language, no generic filler, and no markdown fences.`,
+        `Explain why this action is in your holder's interest, what it risks, and what insight justifies taking that risk now.`,
+        `Map likely coalition support and blockers using DAO share distribution.`,
+        `No canned language, no generic filler, no corporate tone, and no markdown fences.`,
         `Output JSON: {"title":"...","body":"..."}.`,
       ].join('\n'),
       {
@@ -779,7 +799,8 @@ class AgentRunner {
       [
         `You are ${this.name}, opening a SOFT_VOTE discussion thread as a DAO delegate.`,
         `SOFT_VOTE is non-binding and does not execute anything. It is for deliberation, alignment, and tradeoff exploration.`,
-        `Summarize tentative sentiment and what evidence is needed before hard voting.`,
+        `Frame the core disagreement, summarize tentative sentiment, and state what evidence would change your mind before hard voting.`,
+        `Write like an engaged debater, not a committee memo.`,
         `Output JSON: {"title":"...","body":"..."}.`,
       ].join('\n'),
       {
@@ -972,6 +993,12 @@ class AgentRunner {
     return await parseJsonResponse<PostDetailsResponse>(response);
   }
 
+  private async fetchActionDetails(actionId: number): Promise<ActionDetailsResponse | null> {
+    const response = await fetch(`${env.WEB_API_BASE_URL}/actions/${actionId}`);
+    if (!response.ok) return null;
+    return await parseJsonResponse<ActionDetailsResponse>(response);
+  }
+
   private async fetchDaoShares(): Promise<DaoSharesResponse> {
     const response = await fetch(`${env.WEB_API_BASE_URL}/dao/shares`);
     if (!response.ok) {
@@ -1021,12 +1048,26 @@ class AgentRunner {
       .filter((value): value is number => typeof value === 'number')
       .filter((actionId) => !this.votedActions.has(actionId));
 
+    const pendingActionEntries = await Promise.all(
+      pendingActionIds.map(async (actionId) => {
+        const details = await this.fetchActionDetails(actionId);
+        return { actionId, details };
+      }),
+    );
+    const pendingActionDetails: Record<number, ActionDetailsResponse> = {};
+    for (const entry of pendingActionEntries) {
+      if (entry.details) {
+        pendingActionDetails[entry.actionId] = entry.details;
+      }
+    }
+
     const selfShare = daoShares.members.find((member) => member.address.toLowerCase() === account.toLowerCase()) ?? null;
 
     return {
       feed,
       postDetails,
       pendingActionIds,
+      pendingActionDetails,
       daoShares: daoShares.members,
       selfShare,
       memories,
@@ -1137,6 +1178,26 @@ class AgentRunner {
       availableBalance: member.availableBalance,
       totalVotedStake: member.totalVotedStake,
     }));
+    const pendingActionSummary = context.pendingActionIds.map((actionId) => {
+      const details = context.pendingActionDetails[actionId];
+      return {
+        actionId,
+        action: details?.action
+          ? {
+              id: details.action.id,
+              status: details.action.status,
+              type: details.action.type,
+              proposer: details.action.proposer,
+            }
+          : null,
+        votes:
+          details?.votes?.slice(0, 20).map((vote) => ({
+            voter: vote.voter,
+            support: vote.support,
+            stakeAmount: vote.stake_amount,
+          })) ?? [],
+      };
+    });
 
     const memorySummary = context.memories.slice(0, 20).map((memory) => ({
       type: memory.memory_type,
@@ -1158,6 +1219,7 @@ class AgentRunner {
       daoShares: daoShareSummary,
       feed: feedSummary,
       postDetails: postDetailSummary,
+      pendingActions: pendingActionSummary,
       conversationTargets,
       recentCommentedPostIds,
       memories: memorySummary,
@@ -1169,8 +1231,8 @@ class AgentRunner {
     };
 
     const systemPrompt = [
-      `You are ${this.name}, an autonomous DAO ambassador acting for a human crypto holder.`,
-      `Primary objective: represent that holder's interests in governance debates and execution decisions.`,
+      `You are ${this.name}, an autonomous DAO debater acting for a human crypto holder.`,
+      `Primary objective: represent that holder's interests by producing useful disagreement, clearer tradeoffs, and better decisions.`,
       `Use DAO share distribution to guide negotiation strategy: identify who can block/pass decisions and build coalitions explicitly.`,
       `You may choose exactly one on-chain action this tick: idle, post, comment, propose_action, or vote.`,
       `When pending actions exist, prioritize substantive discussion (post/comment or propose_action with action.actionType=SOFT_VOTE) before hard voting.`,
@@ -1181,6 +1243,8 @@ class AgentRunner {
       `You may go deep in a thread using replyToCommentId; depth should usually be 1-3 and only rarely 6+.`,
       `Do not abandon posting: create new discussion posts when there is a genuinely new angle to raise.`,
       `Prefer substantive negotiation over spam. Use specific references to current posts/actions/votes when possible.`,
+      `Style constraints: sound human, pointed, and insight-seeking; avoid robotic/corporate phrasing, generic platitudes, and empty diplomacy.`,
+      `In every non-idle plan, try to add at least one concrete insight: a hidden assumption, second-order effect, or coalition implication.`,
       `Return only strict JSON with fields: plan, rationale, memory, and optional post/comment/action/vote objects.`,
       `Do not include markdown fences.`,
     ].join('\n');
@@ -1860,11 +1924,7 @@ class AgentRunner {
       return 'vote skipped: no available stake';
     }
 
-    const requestedStake = toSafeBigInt(decision.vote?.stakeAmount, 70_000_000n);
-    const stakeAmount = requestedStake > availableStake ? availableStake : requestedStake;
-    if (stakeAmount <= 0n) {
-      return 'vote skipped: computed stake amount is zero';
-    }
+    const stakeAmount = availableStake;
 
     const support = decision.vote?.support ?? true;
 

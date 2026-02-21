@@ -43,7 +43,6 @@ contract ForumActionExecutorFlowTest is Test {
         executor.setForum(address(forum));
         reputation.setWriter(address(forum), true);
         reputation.setWriter(address(executor), true);
-        stakeVault.setLocker(address(forum), true);
         swapTarget = new MockSwapTarget(address(daoToken));
         executor.setWhitelistedTarget(address(swapTarget), true);
         executor.setWhitelistedSelector(MockSwapTarget.swapExactTreasuryTokenForToken.selector, true);
@@ -66,13 +65,13 @@ contract ForumActionExecutorFlowTest is Test {
         assertEq(postId, 1);
 
         vm.prank(alice);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
 
         vm.prank(bob);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
 
         vm.prank(carol);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
 
         bytes memory routerCall = abi.encodeCall(
             MockSwapTarget.swapExactTreasuryTokenForToken, (address(tokenOut), 50e6, 35 ether, address(executor))
@@ -85,6 +84,7 @@ contract ForumActionExecutorFlowTest is Test {
         ActionExecutor.Action memory action = executor.getAction(actionId);
         ActionExecutor.ActionStatus status = action.status;
         assertEq(uint256(status), uint256(ActionExecutor.ActionStatus.EXECUTED));
+        assertEq(action.supportStake, 900e6);
         assertEq(tokenOut.balanceOf(address(executor)), 35 ether);
     }
 
@@ -92,11 +92,11 @@ contract ForumActionExecutorFlowTest is Test {
         uint256 actionId = _createSwapAction(alice, 50e6, 30 ether, block.timestamp + 1 days);
 
         vm.prank(alice);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
         vm.prank(bob);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
         vm.prank(carol);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
 
         bytes memory badRouterCall = abi.encodeCall(
             MockSwapTarget.swapExactTreasuryTokenForToken, (address(tokenOut), 50e6, 1 ether, address(executor))
@@ -132,11 +132,11 @@ contract ForumActionExecutorFlowTest is Test {
         forum.createPost(keccak256("governance config proposal"), uint8(1), abi.encode(actionId));
 
         vm.prank(alice);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
         vm.prank(bob);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
         vm.prank(carol);
-        forum.voteAction(actionId, true, 70e6);
+        forum.voteAction(actionId, true, 1);
 
         vm.prank(dave);
         executor.executeGovernanceConfig(actionId);

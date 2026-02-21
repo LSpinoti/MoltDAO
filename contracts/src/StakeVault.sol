@@ -23,20 +23,15 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
     uint256 public actionBondMin;
 
     mapping(address => uint256) private _bonded;
-    mapping(address => uint256) private _locked;
     mapping(address => UnbondRequest) public unbondRequests;
 
     mapping(address => bool) public slashers;
-    mapping(address => bool) public lockers;
 
     event Bonded(address indexed agent, uint256 amount, uint256 totalBonded);
     event UnbondRequested(address indexed agent, uint256 amount, uint256 unlockTime);
     event UnbondFinalized(address indexed agent, uint256 amount, uint256 totalBonded);
     event Slashed(address indexed agent, uint256 amount, bytes32 reason, address indexed receiver);
-    event StakeLocked(address indexed agent, uint256 amount, uint256 totalLocked);
-    event StakeUnlocked(address indexed agent, uint256 amount, uint256 totalLocked);
     event SlasherUpdated(address indexed account, bool allowed);
-    event LockerUpdated(address indexed account, bool allowed);
     event SlashReceiverUpdated(address indexed receiver);
     event BondMinimumsUpdated(uint256 postBondMin, uint256 actionBondMin);
     event CooldownUpdated(uint256 cooldown);
@@ -49,11 +44,6 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
 
     modifier onlySlasher() {
         if (!slashers[msg.sender]) revert Unauthorized();
-        _;
-    }
-
-    modifier onlyLocker() {
-        if (!lockers[msg.sender]) revert Unauthorized();
         _;
     }
 
@@ -128,49 +118,20 @@ contract StakeVault is IStakeVault, Ownable, Pausable {
         emit Slashed(agent, slashed, reason, slashReceiver);
     }
 
-    function lockStake(address agent, uint256 amount) external override onlyLocker whenNotPaused {
-        if (amount == 0) revert AmountZero();
-        if (availableBalance(agent) < amount) revert InsufficientAvailableBalance();
-
-        _locked[agent] += amount;
-        emit StakeLocked(agent, amount, _locked[agent]);
-    }
-
-    function unlockStake(address agent, uint256 amount) external override onlyLocker whenNotPaused {
-        if (amount == 0) revert AmountZero();
-        if (_locked[agent] < amount) revert InsufficientAvailableBalance();
-
-        _locked[agent] -= amount;
-        emit StakeUnlocked(agent, amount, _locked[agent]);
-    }
-
     function bondedBalance(address agent) external view override returns (uint256) {
         return _bonded[agent];
-    }
-
-    function lockedBalance(address agent) external view returns (uint256) {
-        return _locked[agent];
     }
 
     function availableBalance(address agent) public view override returns (uint256) {
         // Agents can use either wallet-held HLX or vault-bonded HLX as voting/posting stake.
         uint256 bonded = _bonded[agent];
         uint256 wallet = governanceToken.balanceOf(agent);
-        uint256 locked = _locked[agent];
-        uint256 totalStake = bonded + wallet;
-
-        if (totalStake <= locked) return 0;
-        return totalStake - locked;
+        return bonded + wallet;
     }
 
     function setSlasher(address account, bool allowed) external onlyOwner {
         slashers[account] = allowed;
         emit SlasherUpdated(account, allowed);
-    }
-
-    function setLocker(address account, bool allowed) external onlyOwner {
-        lockers[account] = allowed;
-        emit LockerUpdated(account, allowed);
     }
 
     function setSlashReceiver(address receiver) external onlyOwner {

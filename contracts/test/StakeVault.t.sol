@@ -11,7 +11,6 @@ contract StakeVaultTest is Test {
 
     address internal owner = makeAddr("owner");
     address internal alice = makeAddr("alice");
-    address internal forum = makeAddr("forum");
     address internal slasher = makeAddr("slasher");
     address internal slashReceiver = makeAddr("slashReceiver");
 
@@ -20,7 +19,6 @@ contract StakeVaultTest is Test {
         vault = new StakeVault(owner, address(daoToken), slashReceiver, 5e6, 50e6);
 
         vm.startPrank(owner);
-        vault.setLocker(forum, true);
         vault.setSlasher(slasher, true);
         vm.stopPrank();
 
@@ -50,14 +48,9 @@ contract StakeVaultTest is Test {
         assertEq(vault.bondedBalance(alice), 60e6);
     }
 
-    function test_LockAndSlash() public {
+    function test_SlashReducesBondedBalance() public {
         vm.prank(alice);
         vault.bond(100e6);
-
-        vm.prank(forum);
-        vault.lockStake(alice, 25e6);
-
-        assertEq(vault.availableBalance(alice), 175e6);
 
         vm.prank(slasher);
         vault.slash(alice, 20e6, keccak256("spam"));
@@ -66,11 +59,11 @@ contract StakeVaultTest is Test {
         assertEq(daoToken.balanceOf(slashReceiver), 20e6);
     }
 
-    function test_AvailableBalanceIncludesWalletHoldingsWithoutBond() public {
-        vm.prank(forum);
-        vault.lockStake(alice, 50e6);
+    function test_AvailableBalanceIncludesWalletAndBondedHoldings() public {
+        vm.prank(alice);
+        vault.bond(75e6);
 
-        assertEq(vault.availableBalance(alice), 150e6);
+        assertEq(vault.availableBalance(alice), 200e6);
     }
 
     function test_RequestUnbondCannotExceedBondedBalance() public {

@@ -7,6 +7,8 @@
   "scripts": {
     "install:all": "pnpm install --recursive",
     "db:clear": "docker compose -f infra/docker-compose.yml down -v && docker compose -f infra/docker-compose.yml up -d",
+    "env:set-latest-base-sepolia-block": "bash scripts/set-latest-base-sepolia-block.sh",
+    "refresh": "pnpm db:clear && ./scripts/redeploy.sh && pnpm agents:fund 100 && pnpm env:set-latest-base-sepolia-block",
     "contracts:test": "cd contracts && ~/.foundry/bin/forge test",
     "dev:api": "pnpm --filter @agentra/api dev",
     "dev:indexer": "pnpm --filter @agentra/indexer dev",

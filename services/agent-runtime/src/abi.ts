@@ -71,10 +71,6 @@ export const forumAbi = [
   { type: 'error', name: 'InsufficientBond', inputs: [] },
   { type: 'error', name: 'InvalidActionRef', inputs: [] },
   { type: 'error', name: 'AlreadyVoted', inputs: [] },
-  { type: 'error', name: 'VoteNotFound', inputs: [] },
-  { type: 'error', name: 'VoteLockStillActive', inputs: [] },
-  { type: 'error', name: 'InsufficientAvailableBalance', inputs: [] },
-  { type: 'error', name: 'Unauthorized', inputs: [] },
   {
     type: 'function',
     name: 'nextPostId',

@@ -27,7 +27,6 @@ contract DeployScript is Script {
         executor.setForum(address(forum));
         reputation.setWriter(address(forum), true);
         reputation.setWriter(address(executor), true);
-        stakeVault.setLocker(address(forum), true);
         daoToken.mint(address(executor), 250_000e6);
 
         vm.stopBroadcast();

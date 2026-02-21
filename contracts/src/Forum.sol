@@ -34,7 +34,6 @@ contract Forum is Ownable, Pausable {
     struct Vote {
         bool voted;
         bool support;
-        bool unlocked;
         uint256 stakeAmount;
     }
 
@@ -59,7 +58,6 @@ contract Forum is Ownable, Pausable {
     );
     event CommentCreated(uint256 indexed commentId, uint256 indexed parentPostId, address indexed author, bytes32 contentHash);
     event ActionVoted(uint256 indexed actionId, address indexed voter, bool support, uint256 stakeAmount);
-    event VoteStakeUnlocked(uint256 indexed actionId, address indexed voter, uint256 stakeAmount);
 
     error InvalidPostType();
     error InvalidContentHash();
@@ -67,8 +65,6 @@ contract Forum is Ownable, Pausable {
     error InsufficientBond();
     error InvalidActionRef();
     error AlreadyVoted();
-    error VoteNotFound();
-    error VoteLockStillActive();
 
     constructor(address owner_, address stakeVault_, address reputation_, address actionExecutor_) Ownable(owner_) {
         require(stakeVault_ != address(0), "stakeVault");
@@ -140,32 +136,18 @@ contract Forum is Ownable, Pausable {
         emit CommentCreated(commentId, postId, msg.sender, contentHash);
     }
 
-    function voteAction(uint256 actionId, bool support, uint256 stakeAmount) external whenNotPaused {
+    function voteAction(uint256 actionId, bool support, uint256 /* stakeAmount */ ) external whenNotPaused {
         if (!actionExecutor.actionExists(actionId)) revert InvalidActionRef();
         if (actionVotes[actionId][msg.sender].voted) revert AlreadyVoted();
+
+        uint256 stakeAmount = stakeVault.availableBalance(msg.sender);
         if (stakeAmount == 0) revert InsufficientBond();
 
-        actionVotes[actionId][msg.sender] = Vote({voted: true, support: support, unlocked: false, stakeAmount: stakeAmount});
+        actionVotes[actionId][msg.sender] = Vote({voted: true, support: support, stakeAmount: stakeAmount});
 
-        stakeVault.lockStake(msg.sender, stakeAmount);
         actionExecutor.recordVote(actionId, msg.sender, support, stakeAmount);
 
         emit ActionVoted(actionId, msg.sender, support, stakeAmount);
-    }
-
-    function unlockVoteStake(uint256 actionId) external {
-        Vote storage vote = actionVotes[actionId][msg.sender];
-        if (!vote.voted) revert VoteNotFound();
-        if (vote.unlocked) revert VoteLockStillActive();
-
-        bool votingClosed = block.timestamp > actionExecutor.votingEndsAt(actionId);
-        bool actionFinal = actionExecutor.isFinal(actionId);
-        if (!votingClosed && !actionFinal) revert VoteLockStillActive();
-
-        vote.unlocked = true;
-        stakeVault.unlockStake(msg.sender, vote.stakeAmount);
-
-        emit VoteStakeUnlocked(actionId, msg.sender, vote.stakeAmount);
     }
 
     function pause() external onlyOwner {
