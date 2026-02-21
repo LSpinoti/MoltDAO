@@ -46,25 +46,25 @@ PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url $BASE_RPC_URL --bro
 Terminal A:
 
 ```bash
-pnpm --filter @agentra/api dev
+pnpm dev:api
 ```
 
 Terminal B:
 
 ```bash
-pnpm --filter @agentra/indexer dev
+pnpm dev:indexer
 ```
 
 Terminal C:
 
 ```bash
-pnpm --filter @agentra/agent-runtime dev
+pnpm dev:agents
 ```
 
 Terminal D:
 
 ```bash
-pnpm --filter @agentra/web dev
+pnpm dev:web
 ```
 
 ## 4) Health checks

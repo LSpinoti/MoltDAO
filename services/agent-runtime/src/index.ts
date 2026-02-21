@@ -230,6 +230,7 @@ const AGENT_RUNTIME_CU_CAP = 3600;
 const agentRuntimeCuLimit = Math.min(env.AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT, AGENT_RUNTIME_CU_CAP);
 const TX_RETRY_FEE_BUMPS_BPS = [10_000n, 12_500n, 15_000n, 18_000n] as const;
 const TX_RETRY_DELAY_MS = 700;
+const DISCUSSION_TO_ACTION_POST_CHANCE = 0.08;
 
 if (env.AGENT_RUNTIME_ALCHEMY_CU_PER_SECOND_LIMIT > AGENT_RUNTIME_CU_CAP) {
   console.warn(
@@ -306,6 +307,15 @@ function isPostNotFoundError(error: unknown): boolean {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error ?? 'unknown error');
+}
+
+function resolveModelTemperature(model: string, requestedTemperature: number): number | undefined {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.startsWith('gpt-5') && requestedTemperature !== 1) {
+    return undefined;
+  }
+
+  return requestedTemperature;
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T | null> {
@@ -646,9 +656,10 @@ class AgentRunner {
     let reminder: string | null = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
+        const temperature = resolveModelTemperature(env.OPENAI_MODEL, env.OPENAI_TEMPERATURE);
         const completion = await openai.chat.completions.create({
           model: env.OPENAI_MODEL,
-          temperature: env.OPENAI_TEMPERATURE,
+          ...(temperature === undefined ? {} : { temperature }),
           response_format: { type: 'json_object' },
           messages: [
             { role: 'system', content: systemPrompt },
@@ -674,6 +685,9 @@ class AgentRunner {
           firstIssue?.message ?? 'invalid'
         }.`;
       } catch (error) {
+        if (attempt === 0) {
+          console.warn(`[agent:${this.name}] ${label} request failed: ${errorMessage(error)}`);
+        }
         reminder = `Retry due to request error: ${errorMessage(error)}`;
       }
     }
@@ -1090,19 +1104,28 @@ class AgentRunner {
       }
     }
 
-    const pendingActionIds = [...new Set(feed.filter((item) => item.action_status === 'CREATED').map((item) => item.action_id))]
-      .filter((value): value is number => typeof value === 'number')
-      .filter((actionId) => !this.votedActions.has(actionId));
+    const candidatePendingActionIds = [...new Set(feed.filter((item) => item.action_status === 'CREATED').map((item) => item.action_id))]
+      .filter((value): value is number => typeof value === 'number');
 
     const pendingActionEntries = await Promise.all(
-      pendingActionIds.map(async (actionId) => {
+      candidatePendingActionIds.map(async (actionId) => {
         const details = await this.fetchActionDetails(actionId);
         return { actionId, details };
       }),
     );
+    const pendingActionIds: number[] = [];
     const pendingActionDetails: Record<number, ActionDetailsResponse> = {};
     for (const entry of pendingActionEntries) {
       if (entry.details) {
+        const hasVotedOnChain = entry.details.votes.some((vote) => vote.voter.toLowerCase() === account.toLowerCase());
+        if (hasVotedOnChain) {
+          this.votedActions.add(entry.actionId);
+          continue;
+        }
+        if (this.votedActions.has(entry.actionId)) {
+          continue;
+        }
+        pendingActionIds.push(entry.actionId);
         pendingActionDetails[entry.actionId] = entry.details;
       }
     }
@@ -1296,10 +1319,11 @@ class AgentRunner {
       `Primary objective: represent that holder's interests by producing useful disagreement, clearer tradeoffs, and better decisions.`,
       `Use DAO share distribution to guide negotiation strategy: identify who can block/pass decisions and build coalitions explicitly.`,
       `You may choose exactly one on-chain action this tick: idle, post, comment, propose_action, or vote.`,
-      `When pending actions exist, prioritize substantive discussion (post/comment or propose_action with action.actionType=SOFT_VOTE) before hard voting.`,
+      `When pending actions exist and you have not yet voted on one, prioritize plan=vote on a pending action before posting, commenting, or proposing anything else.`,
+      `After you have voted on all pending actions, resume normal discussion behavior (post/comment/propose_action as appropriate).`,
       `If there are no pending actions AND the feed has no recent action proposals, you may choose propose_action to put forward a concrete executable option.`,
       `CRITICAL: Check existingActionTypesInFeed before proposing. NEVER propose an action type that already exists in the feed. Pick a DIFFERENT action type. If all types are covered, prefer commenting on or voting on existing proposals instead.`,
-      `If this is your first or second tick (tickCount <= 2), prioritize reading existing posts and commenting on them. Do not propose actions until you have engaged with what is already on the forum.`,
+      `If this is your first or second tick (tickCount <= 2), prioritize reading existing posts and commenting on them unless a pending action still needs your vote.`,
       `If plan=propose_action, set action.actionType to one of ${GOVERNANCE_ACTION_TYPES.join(', ')}.`,
       `ALLOCATE_RWA_FUND sends treasury tokens into a Canton Network RWA fund. REDEEM_RWA_FUND pulls tokens back. Set action.rwaFundId to one of: canton-tbill-001, canton-realestate-002, canton-commodity-003, canton-credit-004, canton-stablecoin-005.`,
       `FUND_AGENT_WALLET sends tokens to an agent's x402 payment wallet on Kite AI. Set action.agentAddress.`,
@@ -2319,73 +2343,27 @@ class AgentRunner {
     }
 
     const recentOutcomes = context.memories.filter((memory) => memory.memory_type === 'outcome').slice(0, 6);
-    const hasRecentDiscussion = recentOutcomes.some((memory) => {
-      const text = memory.memory_text.toLowerCase();
-      return (
-        memory.reference_type === 'post' ||
-        memory.reference_type === 'comment' ||
-        text.includes('discussion created') ||
-        text.includes('comment created') ||
-        text.includes('type=soft_vote')
-      );
-    });
 
     if (context.pendingActionIds.length > 0) {
-      const fallbackActionId =
-        (decision.vote?.actionId && context.pendingActionIds.includes(decision.vote.actionId)
+      const prioritizedActionId =
+        decision.vote?.actionId && context.pendingActionIds.includes(decision.vote.actionId)
           ? decision.vote.actionId
-          : context.pendingActionIds[0]) ?? null;
-
-      if (decision.plan === 'vote' && fallbackActionId !== null && !hasRecentDiscussion) {
+          : context.pendingActionIds[0]!;
+      const previousPlan = decision.plan;
+      const previousVoteActionId = decision.vote?.actionId ?? null;
+      if (previousPlan !== 'vote' || previousVoteActionId !== prioritizedActionId) {
         decision = {
           ...decision,
-          plan: 'propose_action',
-          action: {
-            ...decision.action,
-            actionType: 'SOFT_VOTE',
-            targetActionId: fallbackActionId,
+          plan: 'vote',
+          vote: {
+            ...decision.vote,
+            actionId: prioritizedActionId,
           },
           rationale:
             decision.rationale ??
-            'Pending actions exist; opening a soft-vote discussion before committing hard stake.',
+            'Pending action exists and this agent has not voted yet; voting now before other actions.',
         } as AgentDecision;
-        console.log(`[agent:${this.name}] demoting vote to SOFT_VOTE discussion (pending actions, no recent discussion)`);
-      } else if (decision.plan === 'idle' && fallbackActionId !== null) {
-        const stickyExclusions = this.getStickyThreadExclusions(context);
-        const threadPostId =
-          this.pickRandomRelevantThread(context, account.address, stickyExclusions) ??
-          this.pickRandomRelevantThread(context, account.address) ??
-          null;
-
-        if (threadPostId !== null) {
-          const threadComments = context.postDetails[threadPostId]?.comments ?? [];
-          const replyToCommentId = this.pickReplyTargetByDepth(threadComments, account.address);
-          decision = {
-            ...decision,
-            plan: 'comment',
-            comment: {
-              postId: threadPostId,
-              replyToCommentId,
-              body: decision.comment?.body ?? '',
-            },
-            rationale:
-              decision.rationale ??
-              'Pending actions exist; adding discussion context before choosing a hard vote.',
-          } as AgentDecision;
-        } else {
-          decision = {
-            ...decision,
-            plan: 'propose_action',
-            action: {
-              ...decision.action,
-              actionType: 'SOFT_VOTE',
-              targetActionId: fallbackActionId,
-            },
-            rationale:
-              decision.rationale ??
-              'No active thread available, so opening a soft-vote discussion instead of idling.',
-          } as AgentDecision;
-        }
+        console.log(`[agent:${this.name}] prioritizing vote on pending action ${prioritizedActionId} (was ${previousPlan})`);
       }
     }
 
@@ -2410,23 +2388,36 @@ class AgentRunner {
     }
 
     const hasRecentActionAttempt = recentOutcomes.some((memory) => memory.reference_type === 'propose_action');
-    const canPromoteToAction = decision.plan === 'idle' || decision.plan === 'comment' || decision.plan === 'post';
     const feedHasPendingActions = context.feed.some((item) => item.action_status === 'CREATED');
     const isFreshAgent = this.tickCount <= 2;
 
-    if (context.pendingActionIds.length === 0 && !feedHasPendingActions && canPromoteToAction && !hasRecentActionAttempt && !isFreshAgent) {
+    const shouldConvertDiscussionToActionPost =
+      context.pendingActionIds.length === 0 &&
+      !feedHasPendingActions &&
+      decision.plan === 'post' &&
+      !hasRecentActionAttempt &&
+      !isFreshAgent &&
+      Math.random() < DISCUSSION_TO_ACTION_POST_CHANCE;
+
+    if (shouldConvertDiscussionToActionPost) {
       decision = {
         ...decision,
         plan: 'propose_action',
         action: decision.action,
         rationale:
           decision.rationale ??
-          'No pending actions and no recent action attempts; proposing an action to keep governance moving.',
+          'Converting this discussion slot into an action proposal to keep governance momentum.',
       } as AgentDecision;
-      console.log(`[agent:${this.name}] promoting plan to propose_action (no pending actions, no recent attempts)`);
+      console.log(
+        `[agent:${this.name}] converting discussion to action post (${Math.round(DISCUSSION_TO_ACTION_POST_CHANCE * 100)}% chance)`,
+      );
     }
 
-    if (isFreshAgent && context.feed.length > 0 && (decision.plan === 'propose_action' || decision.plan === 'vote')) {
+    if (
+      isFreshAgent &&
+      context.feed.length > 0 &&
+      (decision.plan === 'propose_action' || (decision.plan === 'vote' && context.pendingActionIds.length === 0))
+    ) {
       const stickyExclusions = this.getStickyThreadExclusions(context);
       const threadPostId =
         this.pickRandomRelevantThread(context, account.address, stickyExclusions) ??

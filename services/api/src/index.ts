@@ -727,74 +727,30 @@ type RwaFundsResponse = {
   privacyModel: string;
 };
 
+const rwaBaseAum = 2_000_000 + Math.floor(Math.random() * 8_000_000);
+
 function generateRwaFunds(): RwaFundsResponse {
-  const funds: RwaFund[] = [
-    {
-      id: 'canton-tbill-001',
-      name: 'US Treasury Bill Fund',
-      assetClass: 'Government Bonds',
-      aum: '2450000',
-      yield7d: '4.82',
-      allocation: 45,
-      cantonParticipantId: 'participant::canton-agentra-treasury',
-      privacyParties: ['DAO Treasury', 'Custodian', 'Auditor'],
-      status: 'active',
-      maturityDate: '2026-06-15',
-      lastRebalance: new Date(Date.now() - 2 * 86400000).toISOString(),
-    },
-    {
-      id: 'canton-realestate-002',
-      name: 'Tokenized Real Estate Pool',
-      assetClass: 'Real Estate',
-      aum: '1200000',
-      yield7d: '6.15',
-      allocation: 22,
-      cantonParticipantId: 'participant::canton-agentra-realestate',
-      privacyParties: ['DAO Treasury', 'Property Manager'],
-      status: 'active',
-      maturityDate: null,
-      lastRebalance: new Date(Date.now() - 5 * 86400000).toISOString(),
-    },
-    {
-      id: 'canton-commodity-003',
-      name: 'Commodity Index Fund',
-      assetClass: 'Commodities',
-      aum: '890000',
-      yield7d: '3.41',
-      allocation: 16,
-      cantonParticipantId: 'participant::canton-agentra-commodity',
-      privacyParties: ['DAO Treasury', 'Exchange Broker', 'Auditor'],
-      status: 'active',
-      maturityDate: null,
-      lastRebalance: new Date(Date.now() - 1 * 86400000).toISOString(),
-    },
-    {
-      id: 'canton-credit-004',
-      name: 'Private Credit Facility',
-      assetClass: 'Private Credit',
-      aum: '650000',
-      yield7d: '8.73',
-      allocation: 12,
-      cantonParticipantId: 'participant::canton-agentra-credit',
-      privacyParties: ['DAO Treasury', 'Borrower (Redacted)'],
-      status: 'locked',
-      maturityDate: '2026-09-01',
-      lastRebalance: new Date(Date.now() - 14 * 86400000).toISOString(),
-    },
-    {
-      id: 'canton-stablecoin-005',
-      name: 'Stablecoin Yield Reserve',
-      assetClass: 'Cash Equivalents',
-      aum: '310000',
-      yield7d: '5.20',
-      allocation: 5,
-      cantonParticipantId: 'participant::canton-agentra-reserve',
-      privacyParties: ['DAO Treasury'],
-      status: 'active',
-      maturityDate: null,
-      lastRebalance: new Date(Date.now() - 3600000).toISOString(),
-    },
+  const allocations = [
+    { id: 'canton-tbill-001', name: 'US Treasury Bill Fund', assetClass: 'Government Bonds', pct: 45, yield7d: '4.82', participantId: 'participant::canton-agentra-treasury', parties: ['DAO Treasury', 'Custodian', 'Auditor'], status: 'active' as const, maturity: '2026-06-15', rebalanceDaysAgo: 2 },
+    { id: 'canton-realestate-002', name: 'Tokenized Real Estate Pool', assetClass: 'Real Estate', pct: 22, yield7d: '6.15', participantId: 'participant::canton-agentra-realestate', parties: ['DAO Treasury', 'Property Manager'], status: 'active' as const, maturity: null, rebalanceDaysAgo: 5 },
+    { id: 'canton-commodity-003', name: 'Commodity Index Fund', assetClass: 'Commodities', pct: 16, yield7d: '3.41', participantId: 'participant::canton-agentra-commodity', parties: ['DAO Treasury', 'Exchange Broker', 'Auditor'], status: 'active' as const, maturity: null, rebalanceDaysAgo: 1 },
+    { id: 'canton-credit-004', name: 'Private Credit Facility', assetClass: 'Private Credit', pct: 12, yield7d: '8.73', participantId: 'participant::canton-agentra-credit', parties: ['DAO Treasury', 'Borrower (Redacted)'], status: 'locked' as const, maturity: '2026-09-01', rebalanceDaysAgo: 14 },
+    { id: 'canton-stablecoin-005', name: 'Stablecoin Yield Reserve', assetClass: 'Cash Equivalents', pct: 5, yield7d: '5.20', participantId: 'participant::canton-agentra-reserve', parties: ['DAO Treasury'], status: 'active' as const, maturity: null, rebalanceDaysAgo: 0.04 },
   ];
+
+  const funds: RwaFund[] = allocations.map((a) => ({
+    id: a.id,
+    name: a.name,
+    assetClass: a.assetClass,
+    aum: Math.round(rwaBaseAum * a.pct / 100).toString(),
+    yield7d: a.yield7d,
+    allocation: a.pct,
+    cantonParticipantId: a.participantId,
+    privacyParties: a.parties,
+    status: a.status,
+    maturityDate: a.maturity,
+    lastRebalance: new Date(Date.now() - a.rebalanceDaysAgo * 86400000).toISOString(),
+  }));
 
   const totalAum = funds.reduce((sum, f) => sum + Number(f.aum), 0).toString();
   return {

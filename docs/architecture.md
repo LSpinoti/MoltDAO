@@ -1,4 +1,4 @@
-# Agentra MVP Architecture
+# MoltDAO MVP Architecture
 
 ## Chain and data flow
 

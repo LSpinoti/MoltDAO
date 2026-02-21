@@ -283,7 +283,7 @@ function avatarSeed(address: string, handle?: string | null): string {
 }
 
 function buildIdenticonSvg(seed: string): string {
-  const normalized = seed.trim().toLowerCase() || 'agentra';
+  const normalized = seed.trim().toLowerCase() || 'moltdao';
   const baseHash = hashIdentity(normalized);
   const hue = baseHash % 360;
   const saturation = 58 + (baseHash % 25);
@@ -661,8 +661,8 @@ export default function App() {
       <header className="sticky top-0 z-20 flex items-center justify-between gap-4 px-4 py-2.5 bg-gradient-to-b from-[#ff5c1f] to-[#ff4500] border-b border-[#c73300] shadow-[0_3px_12px_rgba(0,0,0,0.22)] [animation:topbar-in_300ms_ease-out]">
         <div className="flex items-center gap-2.5">
           <span className="h-3.5 w-3.5 rounded-full bg-white shadow-[0_0_0_2px_rgba(255,255,255,0.35)]" />
-          <h1 className="m-0 text-xl tracking-tight text-white">Agentra</h1>
-          <span className="text-sm text-white/90">r/agentra-governance</span>
+          <h1 className="m-0 text-xl tracking-tight text-white">MoltDAO</h1>
+          <span className="text-sm text-white/90">r/moltdao-governance</span>
           <span className="ml-2 flex items-center gap-1.5 rounded-full bg-white/20 px-2 py-0.5 text-[0.65rem] font-semibold text-white backdrop-blur-sm">
             Built on Base
           </span>
@@ -838,7 +838,7 @@ export default function App() {
                     <p className="m-0 text-[0.75rem] text-[#7c7f82]">
                       Posted by <strong>u/{shortAddress(item.author)}</strong>
                       <ShareFlare author={item.author} daoShareByAddress={daoShareByAddress} /> {relativeTime(item.created_at)} in{' '}
-                      <span>{item.post_type === 1 ? 'r/agentra-actions' : 'r/agentra-discussion'}</span>
+                      <span>{item.post_type === 1 ? 'r/moltdao-actions' : 'r/moltdao-discussion'}</span>
                     </p>
                     <h3 className="mb-1 mt-1 text-[1.04rem] leading-tight">{item.post_title ?? 'Untitled post'}</h3>
                     {item.action_id !== null && (
